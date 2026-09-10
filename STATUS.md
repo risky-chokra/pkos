@@ -47,10 +47,21 @@ busybox-static + squashfs (read-only /) + overlayfs (upper = RAM / PK-PERSIST pa
 | 7 app runtime | runtime attach, `pk-run` battery (ELF/script/.deb/.exe/.apk/Mach-O/**.ipa**/AppImage/jar/rpm), chroot exec, doosri boot par re-attach, host se rw-img verify — **14 checks** |
 | 8 pendrive kit | kit ISO (runtime andar) → `pk-check` **0 FAIL**, `pk-keymap`, headless install with `--user` + runtime copy (`/var/lib/pk`), installed boot par **`mode=rw-image`** persistence — **15 checks**; `PK_TEST_GUI=1` se +4: `DESKTOP-OK`, `GUI-X-OK`, `GUI-APP-OK` (xterm), `GUI-XCLIENT-OK` (xdpyinfo) |
 
+## 2a. GitHub pe push ho gaya ✓
+
+| | |
+|---|---|
+| repo | https://github.com/risky-chokra/pkos (public, default branch `main`, 78 files) |
+| tag | `v1.0.0` -> commit `9af942b` |
+| release | https://github.com/risky-chokra/pkos/releases/tag/v1.0.0 |
+| assets | `pkos-1.0.iso` (87 633 920 B) + `pkos-1.0-manifest.txt` + `pkos-1.0-apps-manifest.txt` + `pkos-1.0.iso.sha256` + `pkos-1.0-src.tar.gz` + `pkos-1.0.bundle` |
+| verify | release se ISO dobara download karke `sha256sum` milaya: `f1b5c1f3…` **byte-identical** ✓ |
+| not in release | 700 MiB apps+wala ISO (bada asset) — `sudo make runtime-desktop && make apps-iso` se ban jaata hai |
+
 ## 2b. Reset ke baad restore (aapke PC pe bhi wahi 2 command)
 
 ```sh
-git clone pkos-1.0.bundle pkos        # poora repo + history (78 files)
+git clone https://github.com/risky-chokra/pkos.git pkos   # (ya bundle se: git clone pkos-1.0.bundle pkos)
 cd pkos && make doctor && make iso    # toolchain chahiye: apt list docs/BUILD.md me
 sudo make runtime-desktop && make apps-iso   # 700 MiB wala apps+GUI ISO dobara
 ```

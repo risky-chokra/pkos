@@ -1,5 +1,8 @@
 # pk's OS
 
+> Repo: **https://github.com/risky-chokra/pkos** · Release (base ISO + manifests + git
+> bundle): **https://github.com/risky-chokra/pkos/releases/tag/v1.0.0** · Status: [STATUS.md](STATUS.md)
+
 Apna khud ka chhota Linux OS — **x86_64 PC / laptop pe live USB se boot hota hai**, aur
 chahe to **permanent install** bhi ho jaata hai. Koi existing distro ka installer nahi,
 sab kuch is repo se build hota hai: kernel (host ka ya apna), busybox, squashfs, initramfs,
