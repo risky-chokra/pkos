@@ -1,0 +1,59 @@
+# Live system ke /lib/modules me kaun-kaun se .ko copy honge.
+# Patterns `find` ke liye diye jaate hain ($PK_MODULES ke relative paths).
+# Jitna zyada daaloge utna hardware support, utni badi ISO.
+# (initramfs ke liye alag list hai: init/kernel-modules)
+kernel/fs/ext4
+kernel/fs/fat
+kernel/fs/vfat
+kernel/fs/squashfs
+kernel/fs/isofs
+kernel/fs/udf
+kernel/fs/overlayfs
+kernel/fs/exfat
+kernel/fs/xfs
+kernel/fs/btrfs
+kernel/fs/f2fs
+kernel/fs/ntfs3
+kernel/fs/nls
+kernel/fs/jbd2
+kernel/fs/mbcache.ko*
+kernel/crypto
+kernel/lib
+kernel/fs/zstd*
+kernel/crypto/xxhash*
+kernel/drivers/block
+kernel/drivers/nvme
+kernel/drivers/ata
+kernel/drivers/scsi
+kernel/drivers/usb/storage
+kernel/drivers/usb/host
+kernel/drivers/usb/class
+kernel/drivers/usb/serial
+kernel/drivers/hid
+kernel/drivers/input
+kernel/drivers/gpu/drm/tiny/simpledrm.ko*
+kernel/drivers/gpu/drm/drm_kms_helper.ko*
+# --- NIC drivers (udev nahi hai, isliye pk-net boot par modprobe karta hai)
+# virtio: QEMU/KVM guests; ethernet: real PCs; usb: laptops ke USB-Ethernet dongles
+kernel/drivers/net/virtio*
+kernel/drivers/net/net_failover*
+kernel/net/core/failover.ko*
+kernel/net/core/failover.ko*
+kernel/drivers/net/ethernet/intel/e1000*
+kernel/drivers/net/ethernet/intel/e1000e
+kernel/drivers/net/ethernet/intel/igb
+kernel/drivers/net/ethernet/intel/igc
+kernel/drivers/net/ethernet/realtek
+kernel/drivers/net/ethernet/broadcom
+kernel/drivers/net/ethernet/atheros
+kernel/drivers/net/phy
+kernel/drivers/net/usb
+# aur chahiye ho to yeh add karo (thodi badi ISO):
+# kernel/drivers/net/ethernet/intel/i40e
+# kernel/drivers/net/ethernet/intel/ixgbe
+# kernel/drivers/net/ethernet/marvell
+# kernel/drivers/net/ethernet/sfc
+kernel/drivers/net/wireless/intel/iwlwifi
+kernel/drivers/net/wireless/ath
+kernel/net/ipv4
+kernel/net/ipv6

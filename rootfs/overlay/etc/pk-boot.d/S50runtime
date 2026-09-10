@@ -1,0 +1,7 @@
+#!/bin/sh
+# boot hook: app runtime attach karo (/opt/pk) - Linux/Windows apps ke liye
+# band karne ke liye boot option:  pk_runtime=off
+[ -x /sbin/pk-runtime ] || exit 0
+mkdir -p /run/pk
+/sbin/pk-runtime start > /run/pk/runtime.log 2>&1 &
+exit 0

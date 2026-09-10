@@ -1,0 +1,32 @@
+#!/bin/sh
+# pk's OS :: system report
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+sep() { printf -- '--------------------------------------------------\n'; }
+. /etc/os-release 2>/dev/null
+echo "  pk's OS $VERSION  (Linux $(uname -r))"
+sep
+printf 'boot mode   : %s\n' "$(cat /run/pk/mode 2>/dev/null || echo '?')"
+printf 'cmdline     : %s\n' "$(cat /proc/cmdline)"
+printf 'hostname    : %s\n' "$(cat /proc/sys/kernel/hostname)"
+printf 'uptime      : %s\n' "$(cut -d. -f1 /proc/uptime | awk '{printf "%dm%ds\n",$1/60,$1%60}')"
+sep
+echo "cpu      : $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ //') ($(nproc) threads)"
+free -m | awk '/^Mem/ {printf "memory   : %s MB total, %s MB used, %s MB free\n",$2,$3,$4}'
+grep -c . /proc/cpuinfo >/dev/null
+echo "root fs  : $(sed -n 's|^/dev/[^ ]* on / type \([^ ]*\).*|\1|p' /proc/mounts | head -1)"
+df -h / /tmp 2>/dev/null | sed 1d
+sep
+echo "block devices:"
+ls /sys/block | tr '\n' ' '; echo
+for d in /sys/block/*; do
+  dd=${d##*/}; case "$dd" in loop*) continue;; esac
+  printf '  %-10s %6s MB  rmov=%s  %s\n' "$dd" "$(( $(cat $d/size) / 2048 ))" "$(cat $d/removable 2>/dev/null)" "$(cat $d/device/model 2>/dev/null | tr -s ' ')"
+done
+echo
+echo "network:"
+for n in /sys/class/net/*; do i=${n##*/}; [ "$i" = lo ] && continue
+  printf '  %-8s state=%s addr=%s\n' "$i" "$(cat $n/operstate 2>/dev/null)" "$(ip -4 -o addr show "$i" 2>/dev/null | awk '{print $4}')"
+done
+echo
+echo "loaded modules: $(cut -d' ' -f1 /proc/modules | tr '\n' ' ' | cut -c1-200)"
+echo "live base     : $(grep -m1 ' /live-base ' /proc/mounts || echo n/a)"

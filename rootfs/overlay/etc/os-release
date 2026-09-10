@@ -1,0 +1,12 @@
+NAME="pk's OS"
+ID=pkos
+VERSION="1.0"
+VERSION_ID="1.0"
+PRETTY_NAME="pk's OS 1.0 (busybox + Linux kernel, apne haath se banaya)"
+BUILD_ID=pkos-1.0
+HOME_URL="https://example.invalid/pkos"
+SUPPORT_URL="file:/usr/share/doc/pkos/README.md"
+PRIVACY_POLICY_URL="none - 100% local"
+LOGO=pk
+VARIANT="live + installable"
+DEFAULT_HOSTNAME=pk

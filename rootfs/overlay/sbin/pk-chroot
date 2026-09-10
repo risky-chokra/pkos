@@ -1,0 +1,64 @@
+#!/bin/sh
+# pk's OS :: runtime ke andar command chalane ka primitive (mounts + chroot)
+#   pk-chroot <cmd> [args...]     -> /opt/pk me chroot karke cmd
+#   pk-chroot --umount            -> binds hatao
+# pk-shell / pk-get isi par bane hain.
+set -u
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+RT=${PK_RUNTIME_ROOT:-/opt/pk}
+
+have() { command -v "$1" >/dev/null 2>&1; }
+mounted() { grep -q " $1 " /proc/mounts 2>/dev/null; }
+say() { printf 'pk-chroot: %s\n' "$*" >&2; }
+bind() { # <src> <dst>
+  mkdir -p "$RT$2" 2>/dev/null
+  mounted "$RT$2" || mount --bind "$1" "$RT$2" 2>/dev/null || { mkdir -p "$RT$2"; }
+}
+
+enter() {
+  [ -d "$RT" ] || { say "runtime attached nahi hai. 'pk-runtime start' chalao (ya 'make iso WITH_RUNTIME=1')."; return 64; }
+  mounted "$RT" || { say "$RT mount nahi hai (runtime image nahi mila?)"; return 64; }
+  # pseudofs + host state
+  mkdir -p "$RT/proc" "$RT/sys" "$RT/dev" "$RT/tmp" "$RT/run" 2>/dev/null
+  mounted "$RT/proc" || mount -t proc proc "$RT/proc" 2>/dev/null || true
+  mounted "$RT/sys" || mount -t sysfs sys "$RT/sys" 2>/dev/null || true
+  mounted "$RT/dev" || { mount --bind /dev "$RT/dev" 2>/dev/null || true; }
+  mounted "$RT/dev/pts" || { mkdir -p "$RT/dev/pts"; mount -t devpts devpts "$RT/dev/pts" 2>/dev/null || true; }
+  mounted "$RT/tmp" || mount -t tmpfs tmpfs "$RT/tmp" 2>/dev/null || true
+  # /dev/shm apps ke liye (chromium/wine)
+  bind /dev/shm /dev/shm
+  # X11/Wayland sessions (pk-x) agar chal rahe hon
+  [ -d /tmp/.X11-unix ] && bind /tmp/.X11-unix /tmp/.X11-unix
+  [ -e /run/pk/x-wayland ] && bind "$(dirname /run/pk/x-wayland)" /run/pk-x
+  # DNS: live me /etc/resolv.conf chalta hai, runtime me copy karo
+  mkdir -p "$RT/etc" 2>/dev/null
+  cat /etc/resolv.conf > "$RT/etc/resolv.conf" 2>/dev/null || true
+  hostname > "$RT/etc/hostname" 2>/dev/null || true
+  # HOME ke apps/wine prefix ko runtime me bhi dikhao
+  [ -d "$HOME" ] && bind "$HOME" /root
+  return 0
+}
+
+umount_all() {
+  for p in /tmp/.X11-unix /run/pk-x /dev/shm /tmp /dev/pts /dev /sys /proc /root; do
+    umount -R "$RT$p" 2>/dev/null || umount "$RT$p" 2>/dev/null || true
+  done
+  say "binds hataye"
+}
+
+case "${1:-}" in
+  --umount) shift; umount_all; exit 0 ;;
+  --setup-only) enter; exit $? ;;
+esac
+[ $# -gt 0 ] || { set -- /bin/sh; }
+enter || exit $?
+# env: runtime ke andar wahi PATH jo profile set karta
+if [ -x "$RT/usr/bin/env" ]; then
+  chroot "$RT" /usr/bin/env -i HOME=/root TERM="${TERM:-linux}" \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    DISPLAY="${DISPLAY:-}" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
+    LANG=C LC_ALL=C \
+    "$@"
+else
+  chroot "$RT" /bin/sh -c 'exec "$@"' -- "$@"
+fi

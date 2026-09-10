@@ -1,0 +1,19 @@
+#!/bin/sh
+# pk's OS :: /sbin/pk-console <tty>
+# live  = bina password ke root shell ; installed = login prompt
+# shellcheck shell=sh
+TTY=${1:-tty1}
+# device nahi hai (e.g. inittab me ttyS0 aur machine me serial port nahi) ->
+# exit karne se pehle so jao, warna init ka respawn busy-loop
+if [ ! -c "/dev/$TTY" ]; then sleep 120; exit 0; fi
+case $TTY in
+  ttyS*|ttyAMA*|hvc*|ttyGS*) SPEED=${PK_SERIAL_SPEED:-115200} ;;
+  *) SPEED=38400 ;;
+esac
+if [ -e /run/pk/require-login ]; then
+  exec getty "$SPEED" "$TTY" linux
+fi
+cd /root || cd /
+echo
+[ -f /etc/issue ] && sed -e "s|@PK_VER@|$(cut -d= -f2 /etc/pk-build 2>/dev/null || echo 1.0)|" -e 's|\\l|'"$TTY"'|' /etc/issue
+exec /bin/sh -l

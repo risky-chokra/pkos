@@ -1,0 +1,38 @@
+#!/bin/sh
+# pk's OS :: build/work/rootfs -> build/work/iso/live/pk.sqfs
+# shellcheck shell=sh disable=SC3030,SC2086
+set -eu
+PK_ROOT=$(cd "$(dirname "$0")/.." && pwd); export PK_ROOT
+# shellcheck disable=SC1091
+. "$PK_ROOT/scripts/pk.sh"
+
+OV=$WORK/rootfs
+IMG=$WORK/iso/live/pk.sqfs
+[ -d "$OV" ] || die "pehle: scripts/build-rootfs (ya make live)"
+have mksquashfs || die "mksquashfs missing -> sudo apt install squashfs-tools"
+resolve_kernel
+
+# kernel kis compression ko unpack kar sakta hai? /boot/config se pata karo
+cfg=/boot/config-$KVER
+comp=${SQUASH_COMP:-auto}
+if [ "$comp" = auto ]; then
+  for c in zstd xz lz4 gzip; do
+    key=ZSTD; case $c in xz) key=XZ;; lz4) key=LZ4;; gzip) key=ZLIB;; esac
+    if [ ! -r "$cfg" ]; then comp=$c; break; fi
+    if grep -qE "^CONFIG_SQUASHFS_$key=y" "$cfg"; then comp=$c; break; fi
+  done
+  [ -n "$comp" ] || { warn "$cfg me koi SQUASHFS_*=y nahi -> gzip"; comp=gzip; }
+  [ -r "$cfg" ] || log "note: $cfg nahi mila, $comp use kar raha hoon"
+fi
+mkdir -p "$(dirname "$IMG")"
+rm -f "$IMG"
+log "squashfs (-comp $comp, -all-root, 1MiB blocks)..."
+if ! mksquashfs "$OV" "$IMG" -comp "$comp" -b 1048576 -noappend -all-root \
+     > "$WORK/squashfs.log" 2>&1; then
+  tail -3 "$WORK/squashfs.log" || true
+  warn "$comp fail -> xz try"
+  mksquashfs "$OV" "$IMG" -comp xz -b 1048576 -noappend -all-root >> "$WORK/squashfs.log" 2>&1 \
+    || die "mksquashfs fail (log: $WORK/squashfs.log)"
+fi
+grep -E "Exportable|Total bytes read|Compression" "$WORK/squashfs.log" | head -4 | sed 's/^/    /'
+log "  -> $IMG  ($(du -h "$IMG" | cut -f1))"

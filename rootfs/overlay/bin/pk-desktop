@@ -1,0 +1,99 @@
+#!/bin/sh
+# pk's OS :: desktop session uthao (weston/KMS -> Xorg -> Xvfb fallback)
+#   pk-desktop                start + ek terminal + welcome
+#   pk-desktop app <x>        GUI app kholo (pk-run --gui)
+#   pk-desktop status         kya chal raha hai, kaunsa display
+#   pk-desktop stop           session band
+#   pk-desktop vnc <port>     Xvfb + vnc (headless machine ko screen dikhane ke liye)
+#
+# Sabse achha experience: runtime me weston + xterm (make runtime --variant=desktop/full).
+set -u
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+RT=${PK_RUNTIME_ROOT:-/opt/pk}
+have() { command -v "$1" >/dev/null 2>&1; }
+say()  { printf 'pk-desktop: %s\n' "$*"; }
+warn() { printf 'pk-desktop: %s\n' "$*" >&2; }
+mark() { ( printf '### PK: %s ###\n' "$*" > /dev/console ) 2>/dev/null; ( printf '%s\n' "$*" > /dev/kmsg ) 2>/dev/null; }
+runtime_ok() { grep -q " $RT " /proc/mounts 2>/dev/null && [ -d "$RT/usr" ]; }
+rtbin() { runtime_ok && { [ -x "$RT/usr/bin/$1" ] || [ -e "$RT/usr/bin/$1" ] || [ -L "$RT/usr/bin/$1" ]; }; }
+
+status() {
+  if [ -r /run/pk/x-env ]; then
+    . /run/pk/x-env
+    echo "display : DISPLAY=${DISPLAY:-none} WAYLAND=${WAYLAND_DISPLAY:-none}"
+  else
+    echo "display : koi session nahi (/run/pk/x-env nahi hai)"
+  fi
+  echo "compositor: $(cat /run/pk/x.kind 2>/dev/null || echo '?')"
+  echo "log       : /run/pk/x.log (last 5)"
+  tail -5 /run/pk/x.log 2>/dev/null | sed 's/^/  /'
+}
+
+start() {
+  if ! runtime_ok; then
+    warn "app runtime nahi laga -> GUI ke liye runtime chahiye (weston/xterm uske andar hote hain)"
+    warn "  sudo make runtime  (build/pk-runtime.sqfs)  ->  make iso WITH_RUNTIME=1"
+    warn "  ya live me:  pk-runtime start"
+    mark "DESKTOP-NO-RUNTIME"
+    return 71
+  fi
+  if ! rtbin weston && ! rtbin Xorg && ! rtbin Xvfb; then
+    say "runtime me koi compositor nahi -> install kar rahe hain (net chahiye)"
+    pk-get install -y weston xterm >/dev/null 2>&1 || pk-get install -y xvfb xterm >/dev/null 2>&1 || {
+      warn "install fail (net? 'pk-net dhcp') - manual: pk-get install -y weston xterm xvfb x11-utils"
+      mark "DESKTOP-INSTALL-FAIL"; return 70; }
+  fi
+  pk-x start >/dev/null 2>&1 || pk-x start weston >/dev/null 2>&1
+  if [ -r /run/pk/x-env ]; then . /run/pk/x-env; fi
+  if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    warn "session nahi utha; detail: cat /run/pk/x.log"
+    mark "DESKTOP-FAIL"
+    return 1
+  fi
+  # welcome + terminal
+  cat > /root/pk-desktop-welcome.txt <<'W'
+pk's OS desktop
+  apps     :  pk-run --gui xterm        (ya terminal me jo bhi)
+             pk-run --gui htop
+             pk-get install -y firefox-esr && pk-run --gui firefox-esr
+  install  :  pk-install --target=auto   (disk pe permanent)
+  check    :  pk-check --all
+  iOS/Android: pk-ios why ; pk-android doctor
+W
+  if rtbin xterm; then
+    pk-run --gui xterm -e sh -c 'cat /root/pk-desktop-welcome.txt; echo; exec /bin/sh' >/dev/null 2>&1 &
+  fi
+  say "session chal raha hai: DISPLAY=${DISPLAY:-} WAYLAND=${WAYLAND_DISPLAY:-}"
+  say "terminal khola (agar xterm hai). App:  pk-desktop app <naam>"
+  mark "DESKTOP-OK (${DISPLAY:-${WAYLAND_DISPLAY:-?}})"
+  return 0
+}
+
+vnc() {
+  port=${1:-5900}
+  if ! have pk-x; then
+    warn "pk-x nahi mila"; return 70
+  fi
+  if ! rtbin Xvfb; then warn "Xvfb nahi -> pk-get install -y xvfb x11-xserver-utils"; return 70; fi
+  pk-x start xvfb >/dev/null 2>&1
+  if rtbin x11vnc; then
+    say "x11vnc :$port start (host se: ssh -L $port:localhost:$port root@<ip> phir vnc viewer)"
+    pk-chroot /usr/bin/x11vnc -forever -shared -localhost -rfbport "$port" >/run/pk/vnc.log 2>&1 &
+    mark "DESKTOP-VNC-OK ($port)"
+  else
+    warn "x11vnc nahi -> pk-get install -y x11vnc"
+    return 70
+  fi
+}
+
+case "${1:-start}" in
+  start|"") shift 2>/dev/null || true; start ;;
+  app)      shift; [ $# -gt 0 ] || { echo "usage: pk-desktop app <x> [args...]"; exit 1; }
+            [ -r /run/pk/x-env ] && . /run/pk/x-env && export DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR
+            pk-run --gui "$@" ;;
+  status)   status ;;
+  stop)     pk-x stop ;;
+  vnc)      shift; vnc "${1:-5900}" ;;
+  --help|-h) sed -n '2,10p' "$0" ;;
+  *) warn "unknown: $1"; exit 1 ;;
+esac

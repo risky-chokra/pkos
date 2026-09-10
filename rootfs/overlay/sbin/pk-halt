@@ -1,0 +1,7 @@
+#!/bin/sh
+# pk's OS :: shutdown hook (live media safely unmount karo taaki USB/CD turant nikal sake)
+sync
+umount /live-iso 2>/dev/null
+umount /live-base 2>/dev/null
+umount /persistence 2>/dev/null
+exit 0

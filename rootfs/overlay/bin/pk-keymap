@@ -1,0 +1,80 @@
+#!/bin/sh
+# pk's OS :: keyboard layout (console + desktop dono)
+#   pk-keymap              current + available layouts
+#   pk-keymap in           console (busybox loadkmap) + GUI (setxkbmap) dono set
+#   pk-keymap us --console-only / --gui-only
+# Boot option:  pk_keymap=in      (pk-boot khud yehi chalata hai)
+set -u
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+RT=${PK_RUNTIME_ROOT:-/opt/pk}
+KDIR=/usr/share/kmap
+have() { command -v "$1" >/dev/null 2>&1; }
+say()  { printf 'pk-keymap: %s\n' "$*"; }
+warn() { printf 'pk-keymap: %s\n' "$*" >&2; }
+mark() { ( printf '### PK: %s ###\n' "$*" > /dev/console ) 2>/dev/null; ( printf '%s\n' "$*" > /dev/kmsg ) 2>/dev/null; }
+runtime_ok() { grep -q " $RT " /proc/mounts 2>/dev/null && [ -d "$RT/usr" ]; }
+
+avail() {
+  [ -d "$KDIR" ] || return 0
+  ls -1 "$KDIR" 2>/dev/null | sed 's/\.kmap$//' | tr '\n' ' '
+}
+
+set_console() { # <layout>
+  l=$1
+  f=$KDIR/$l.kmap
+  if [ ! -f "$f" ]; then
+    # common aliases
+    case "$l" in
+      uk) f=$KDIR/uk.kmap ;;
+      en|en_US|en-us) f=$KDIR/us.kmap ;;
+      hi|dev|devanagari) f=$KDIR/in.kmap ;;
+    esac
+  fi
+  if [ -f "$f" ]; then
+    if busybox loadkmap < "$f" 2>/dev/null; then say "console keymap: $l ✓"; return 0; fi
+    if have loadkmap; then loadkmap < "$f" && { say "console keymap: $l ✓"; return 0; }
+    elif have loadkeys; then loadkeys "$f" && { say "console keymap: $l (loadkeys)"; return 0; }
+    fi
+    warn "loadkmap fail"; return 1
+  fi
+  warn "$KDIR/$l.kmap nahi (builder par kbd ka data copy nahi hua? build-rootfs isko /usr/share/keymaps se laata hai)"
+  return 1
+}
+
+set_gui() { # <layout>
+  l=$1
+  if runtime_ok && [ -x "$RT/usr/bin/setxkbmap" ]; then
+    pk-chroot /usr/bin/setxkbmap -layout "$l" 2>/dev/null && { say "GUI keymap (setxkbmap): $l ✓"; return 0; }
+  fi
+  if have setxkbmap; then setxkbmap -layout "$l" 2>/dev/null && { say "GUI keymap: $l ✓"; return 0; }; fi
+  warn "GUI keymap set nahi hua (runtime me x11-xkb-utils chahiye: pk-get install -y x11-xkb-utils xkb-data)"
+  return 1
+}
+
+case "${1:-}" in
+  "")
+    cur=$(cat /run/pk/keymap 2>/dev/null || echo us)
+    echo "current : $cur"
+    echo "console : $(avail)"
+    echo "          (naya layout chahiye to builder par 'kbd' package install karke make iso karo)"
+    ;;
+  --help|-h) sed -n '2,8p' "$0" ;;
+  list) avail; echo ;;
+  *)
+    lay=$1; shift 2>/dev/null || true
+    con=1; gui=1
+    for a in "$@"; do
+      case "$a" in
+        --console-only) gui=0 ;;
+        --gui-only)     con=0 ;;
+      esac
+    done
+    mkdir -p /run/pk 2>/dev/null
+    rc=0
+    [ "$con" = 1 ] && { set_console "$lay" || rc=1; }
+    [ "$gui" = 1 ] && { set_gui "$lay" || rc=1; }
+    printf '%s\n' "$lay" > /run/pk/keymap 2>/dev/null
+    if [ "$rc" = 0 ]; then mark "KEYMAP-OK ($lay)"; else mark "KEYMAP-PARTIAL ($lay)"; fi
+    exit $rc
+    ;;
+esac

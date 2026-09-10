@@ -1,0 +1,10 @@
+================================================================
+  pk's OS - apna khud ka chhota Linux OS
+  help      : pk-help
+  system    : pk-info
+  install   : pk-install            (disk pe permanent install)
+  network   : pk-net dhcp
+  apps      : pk-run ./app  |  pk-shell  |  pk-get install -y <pkg>   (pk-runtime status)
+  persistence: pk-persist           (USB pe changes save karne ke liye)
+  Live session me sab changes RAM me hain; reboot pe reset.
+================================================================

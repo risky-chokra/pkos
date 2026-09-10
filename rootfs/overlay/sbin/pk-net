@@ -1,0 +1,88 @@
+#!/bin/sh
+# pk's OS :: network helper   usage: pk-net [dhcp|status|down]
+# Live/inittab ke boot hook se chalta hai; output /var/log/pk-net.log jaata hai.
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+
+say() { printf 'pk-net: %s\n' "$*" > /dev/console 2>/dev/null; printf '%s\n' "$*"; }
+first_if() {
+  for d in /sys/class/net/*; do
+    [ -e "$d" ] || continue
+    i=${d##*/}
+    [ "$i" = lo ] && continue
+    printf '%s\n' "$i"
+    return 0
+  done
+  return 1
+}
+iface_has_ip() { ip addr show dev "$1" 2>/dev/null | grep -q 'inet ' || ifconfig "$1" 2>/dev/null | grep -q 'inet addr'; }
+
+case "${1:-status}" in
+  dhcp)
+    # udev nahi hai -> NIC drivers khud load karo (jo hain wahi; baaki fail ignore)
+    MODERR=""
+    if command -v modprobe >/dev/null 2>&1; then
+      for m in virtio_net net_failover failover virtio_pci e1000 e1000e igb igc r8169 \
+               tg3 bnxt_en atl1c alx r8152 ax88179_178a aqc111 asix lan78xx cdc_ether smsc75xx; do
+        out=$(modprobe "$m" 2>&1) || case "$out" in
+          *"not found"*) : ;;
+          *) MODERR="$MODERR | $m: $(printf '%s' "$out" | tr '\n' ' ')" ;;
+        esac
+      done
+      tries=0
+      while [ "$tries" -lt 5 ]; do
+        first_if >/dev/null 2>&1 && break
+        sleep 1; tries=$((tries + 1))
+      done
+    fi
+    IF=$(first_if) || { say "koi NIC nahi mili (/sys/class/net khali)";
+                        [ -n "$MODERR" ] && say "modprobe:$MODERR"
+                        exit 2; }
+    say "NIC: $IF"
+    SCRIPT=""
+    for cand in /usr/share/udhcpc/default.script /etc/udhcpc/default.script; do
+      [ -f "$cand" ] && { SCRIPT=$cand; break; }
+    done
+    [ -n "$SCRIPT" ] && say "script: $SCRIPT" || say "WARNING: koi udhcpc script nahi mila (IP apply nahi hoga)"
+    ip link set "$IF" up 2>/dev/null || ifconfig "$IF" up 2>/dev/null
+    wait=0
+    while [ "$wait" -lt 8 ]; do
+      [ "$(cat "/sys/class/net/$IF/carrier" 2>/dev/null)" = 1 ] && break
+      sleep 1; wait=$((wait + 1))
+    done
+    say "carrier=$(cat "/sys/class/net/$IF/carrier" 2>/dev/null) after ${wait}s"
+    command -v udhcpc >/dev/null 2>&1 || { say "udhcpc applet nahi hai"; exit 3; }
+    # -q: lease ke baad exit, -n: na milne par exit (hang na ho), -p: pidfile
+    if [ -n "$SCRIPT" ]; then
+      udhcpc -i "$IF" -s "$SCRIPT" -p /run/udhcpc."$IF".pid -t 10 -T 2 -n -q >/tmp/udhcpc.out 2>&1
+    else
+      udhcpc -i "$IF" -p /run/udhcpc."$IF".pid -t 10 -T 2 -n -q >/tmp/udhcpc.out 2>&1
+    fi
+    RC=$?
+    say "udhcpc rc=$RC"
+    [ -s /tmp/udhcpc.out ] && sed 's/^/  udhcpc: /' /tmp/udhcpc.out
+    if iface_has_ip "$IF"; then
+      say "IP mil gaya: $(ip addr show dev "$IF" 2>/dev/null | awk '/inet /{print $2; exit}')"
+      exit 0
+    else
+      say "IP nahi mila -- ip addr show:"
+      ip addr show "$IF" 2>&1 | sed 's/^/    /'
+      exit 1
+    fi
+    ;;
+  status)
+    for n in /sys/class/net/*; do
+      [ -e "$n" ] || continue
+      i=${n##*/}; st=$(cat "$n/operstate" 2>/dev/null)
+      a=$(ip addr show "$i" 2>/dev/null | awk '/inet /{print $2; exit}')
+      printf '%-8s %-6s %s\n' "$i" "$st" "${a:-no-ip}"
+    done
+    [ -r /etc/resolv.conf ] && echo "dns: $(grep -m1 nameserver /etc/resolv.conf | awk '{print $2}')"
+    ;;
+  down)
+    for n in /sys/class/net/*; do
+      [ -e "$n" ] || continue
+      i=${n##*/}; [ "$i" = lo ] || ip link set "$i" down 2>/dev/null
+    done ;;
+  *) echo "usage: pk-net [dhcp|status|down]"; exit 1 ;;
+esac
+exit 0

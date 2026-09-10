@@ -1,0 +1,258 @@
+# pk's OS
+
+Apna khud ka chhota Linux OS — **x86_64 PC / laptop pe live USB se boot hota hai**, aur
+chahe to **permanent install** bhi ho jaata hai. Koi existing distro ka installer nahi,
+sab kuch is repo se build hota hai: kernel (host ka ya apna), busybox, squashfs, initramfs,
+GRUB, installer — sab scripts me.
+
+```
+ build/pkos.iso  ──dd──►  USB pendrive  ──boot──►  Live session (RAM overlay)
+                                     │
+                                     └─► pk-install --target=auto  ──►  permanent install
+```
+
+| | |
+|---|---|
+| Image | squashfs (zstd) + overlayfs, root = read-only base + RAM upper |
+| Init | custom initramfs `/init` (busybox ash) → `run-init` → busybox init |
+| Kernel | host ka `/boot/vmlinuz-*` (default) **ya** `make kernel` se apna |
+| Boot | hybrid ISO: BIOS (i386-pc) + UEFI (x86_64-efi), `dd` se USB pe |
+| Install | `pk-install` → GPT (bios_grub + ESP + ext4) + GRUB + `root=UUID=` |
+| Size | **77 MiB ISO** (80.9 MB) = 41 MiB squashfs rootfs (956 kernel modules, NIC drivers included) + 3.3 MiB initramfs (44 boot modules) + kernel |
+| Login | live: `root` / `pk` (auto-login) · installed: password zaroori |
+
+---
+
+## 1. Quick start (Debian / Ubuntu host)
+
+```sh
+# toolchain (ek baar)
+sudo apt-get update
+sudo apt-get install -y build-essential make busybox-static cpio squashfs-tools \
+    xorriso mtools dosfstools parted e2fsprogs util-linux kmod \
+    grub-pc-bin grub-efi-amd64-bin grub2-common initramfs-tools-core \
+    linux-image-amd64 dropbear openssl
+# emulator QA ke liye (recommended)
+sudo apt-get install -y qemu-system-x86 ovmf
+
+git clone <repo> pkos && cd pkos
+make doctor        # sab tools hai? version check
+make iso           # -> build/pkos.iso   (~1-2 min)
+make test          # emulator me 7-stage QA (live · install · installed-boot · toram ·
+                   #   UEFI · persistence+net+ssh · app runtime)  ~10 min
+make run           # QEMU me live session (serial/stdio)
+```
+
+`make test` ka output aisa dikhega (har stage ka poora serial log `build/test-logs/` me):
+
+```
+=== 0/7  test ISO variant (default args: selftest + poweroff + ttyS0) ===
+  PASS test ISO: pkos-test.iso (78M)
+=== 1/7  live boot from ISO (grub + cdrom) ===
+  PASS grub -> kernel -> initrd -> squashfs + overlay -> init
+  PASS self test pass (RAM overlay writable)
+  PASS squashfs base read-only hai
+  PASS installer ke tools (parted/mke2fs/grub-install...) chal sakte hain
+=== 2/7  headless install -> testdisk.img (3072MB virtio disk) ===
+  PASS installer pura hua (partition + copy + grub)
+  PASS installed tree sahi (init + kernel + initrd + marker)
+  PASS root password install ke baad 'PkTest-123' se match karta hai (sha-5)
+  PASS installed grub.cfg root=UUID use karta hai (device-name pe depend nahi)
+  PASS installed system me DHCP on hai (etc/default/pk)
+=== 3/7  installed disk ka apna GRUB (BIOS) -> installed root ===
+  PASS installed system boot hua (apne GRUB se)
+  PASS installed /etc/shadow me real sha-crypt hash hai
+  PASS installed system password maangta hai (autologin nahi)
+=== 4/7  toram (image RAM me copy -> media mount reuse) ===
+  PASS image RAM me copy hua
+  PASS toram ke baad bhi system boot hua
+=== 5/7  UEFI (OVMF) boot from ISO ===
+  PASS UEFI (OVMF) se bhi boot hota hai
+=== 6/7  persistence (PK-PERSIST disk) + DHCP + SSH ===
+  PASS init ko persistence partition mili
+  PASS root overlay ka upperdir persist disk par hai
+  PASS reboot ke baad bhi changes zinda (persistence kaam karta hai)
+  PASS DHCP se IP mila (pk_net=dhcp)
+  PASS dropbear SSH chalu (pk_ssh=on)
+=== 7/7  app runtime (Linux/Windows/.deb dispatch) + pk-run selftest ===
+  PASS app runtime /opt/pk par attach hua (PK-RUNTIME disk se)
+  PASS native Linux ELF app chali
+  PASS .deb install + launcher bana
+  PASS Windows .exe Wine dispatch se chala
+  PASS .apk pehchana + honest diagnostic (binder/waydroid)
+  PASS Mach-O (macOS) sahi reason ke saath mana kiya
+  PASS installed app runtime ke rw overlay me hai (host se verify)
+  PASS dusri boot par bhi runtime attach hua
+
+==================================================
+  QA PASS  43 checks ok  (logs: build/test-logs)
+```
+(43 = saate stages ke total checks; machine pe depend karta hai — TCG emulation me
+~10 min lagte hain. `make test-apps` se sirf apps layer, ~30 s me.)
+
+## 2. Live pendrive banao
+
+```sh
+lsblk                                  # USB ka naam dekho (jaise /dev/sdb)
+make usb USB=/dev/sdb                  # confirm maangega, dd + verify karega
+```
+
+`make usb` = `tools/write-usb.sh`, jo mounted-disks/system-disk jaisi galtiyan hone se
+rokta hai. Manually:
+
+```sh
+sudo dd if=build/pkos.iso of=/dev/sdb bs=4M status=progress oflag=sync
+```
+
+> Windows pe: **Rufus → "DD mode"** (ISO mode nahi), ya `dd`/`usbimager`.
+
+Booting: reset → boot menu (`F12` / `F8` / `Esc` / `F2`) → USB select karo.
+**Secure Boot OFF karo** — pk's OS self-built hai, signed nahi.
+GRUB menu me 9 options (hotkey bracket me): `live` [l], `toram` [t],
+`persistent` [p], `network + SSH` [n], `install to internal disk` [i],
+`install: headless` [a], `debug` [d], `serial console` [c], `single user` [s].
+`e` dabakar kisi bhi entry me kernel cmdline edit bhi kar sakte ho.
+
+Live session me:
+
+```
+login: root        password: pk          # (autologin on tty1; serial pe login)
+pk-help         # sab commands
+pk-info         # mode/kernel/media/root mount
+pk-net dhcp     # network
+pk-ssh          # dropbear SSH server
+pk-persist      # USB pe persistence partition banao (changes save hoonge)
+pk-install --target=auto                 # permanent install (confirm maangega)
+```
+
+## 3. Permanent install
+
+Live USB se boot karke:
+
+```sh
+pk-install --info                 # kaunsi disk milegi, kuch nahi chhedta
+pk-install --target=auto --yes    # pehli internal disk pe GPT + ext4 + GRUB
+```
+
+Kya-kya hota hai:
+- GPT: `p1` bios_grub (2 MiB) · `p2` ESP vfat (512 MiB) · `p3` ext4 root (baaki space)
+- Root filesystem **squashfs se copy** hoti hai (RAM overlay ka kachra nahi jaata)
+- `/boot/pk-kernel` + `/boot/pk-initrd` copy — wahi initramfs `root=UUID=` resolve karta hai
+- `/etc/fstab` UUID se, `grub-install` **i386-pc aur x86_64-efi dono** (hybrid boot)
+- Installed system pe `/etc/pk-installed` hota hai → **login password maangta hai**
+  (live ka default `pk`, `--root-password=` se badlo)
+
+Reboot karke USB nikaal lo → disk se boot.
+
+### Headless / unattended install (koi keyboard nahi)
+
+GRUB menu se `install (headless auto)` chuno, ya kernel cmdline:
+
+```
+pk_media=/dev/sdb pk_install=auto pk_silent pk_halt pk_rootpw=MeraPass
+```
+
+- `pk_install=auto|<dev>` → boot hote hi install
+- `pk_silent` → installer ka output `/run/pk-install.log` me, console par tail
+- `pk_halt` → khatam hote hi `poweroff` (imaging ke liye)
+- `pk_net=dhcp` → boot par NIC driver load karke DHCP (udev nahi hai, isliye
+  `pk-net` khud `modprobe` karta hai: virtio_net, e1000/e1000e, igb/igc, r8169,
+  tg3/bnxt_en, atl1c/alx + USB-Ethernet (r8152, ax88179, asix, lan78xx, cdc_ether, smsc75xx))
+- `pk_ssh=on` → dropbear :22 chalu (`root`/`pk` se login; `pk_ssh=off` se band)
+- Baad me bhi: `pk-net dhcp` / `pk-net status` / `pk-ssh start`
+
+Installed system me `pk-install` `/etc/default/pk` ka `PK_DHCP=yes` kar deta
+hai — reboot par network apne aap up (QA stage 2 me yeh bhi check hota hai).
+
+## 4. Apna kernel (optional, par mazedar)
+
+```sh
+make kernel                                   # download + build (~30-90 min, 2 core pe)
+make clean-rootfs
+make iso PK_KERNEL=$PWD/build/kernel-6.12/bzImage \
+          PK_MODULES=$PWD/build/kernel-6.12/lib/modules/6.12.0
+```
+
+`scripts/build-kernel` defconfig pe boot-critical cheezein built-in karta hai
+(`BLK_DEV_LOOP`, `SQUASHFS`, `OVERLAY_FS`, `EXT4`, `ISO9660`, `VFAT`, `VT`, `SERIAL_8250_CONSOLE`)
+aur baki hardware module me — initramfs me sirf wahi jaate hain jo chahiye.
+Config philosophy aur knobs: [docs/KERNEL.md](docs/KERNEL.md).
+
+## 5. Repo ka layout
+
+```
+Makefile                 sab targets (doctor/live/squash/initrd/iso/run/test/usb/kernel/clean)
+config/live.conf         naam, version, hostname, live password, squash compression, cmdline
+config/live-bins.txt     live image me jaane wale host binaries (parted, mke2fs, grub-*, dropbear…)
+config/live-modules.txt  live /lib/modules me jaane wale module patterns
+init/init                initramfs ka /init  (media dhoondho → squashfs+overlay → run-init)
+init/kernel-modules     initrd me jaane wale modules (boot-critical)
+init/grub.cfg            ISO ka GRUB menu template (9 boot options)
+scripts/build-rootfs     squashfs ke liye tree stage karta hai
+scripts/collect-bins     ELF + ldd closure → rootfs me absolute paths ke saath
+scripts/mk-squashfs      mksquashfs (zstd, 1 MiB blocks, -all-root)
+scripts/mk-initrd        /init + modules + busybox → gzip cpio
+scripts/mk-iso           grub-mkrescue → hybrid ISO
+scripts/run-qemu.sh      QEMU launcher (BIOS/UEFI/serial/kernel-boot, sandbox-friendly)
+scripts/run-test.sh      6-stage emulator QA (live → install → installed boot → toram → UEFI → persistence+net+ssh)
+scripts/doctor.sh        toolchain check
+rootfs/overlay/          OS ke config + scripts (pk-boot, pk-install, inittab, …)
+tools/write-usb.sh       dd to USB, safety checks ke saath
+tools/gen-shadow-hash    sha-512 root hash banao (etc/shadow ke liye)
+docs/                    BUILD · REAL-PC · PERSISTENCE · APPS · KERNEL · TROUBLE
+```
+
+Aur details:
+[docs/BUILD.md](docs/BUILD.md) · [docs/REAL-PC.md](docs/REAL-PC.md) ·
+[docs/PERSISTENCE.md](docs/PERSISTENCE.md) · [docs/TROUBLE.md](docs/TROUBLE.md) ·
+[docs/APPS.md](docs/APPS.md)
+
+## 5b. Apps chalana (Linux / Windows / Android / macOS)
+
+Base ISO chhota hai isliye usme sirf busybox + drivers hain. **App Runtime** jodte ho to
+koi bhi Linux app chalne lagti hai (aur Wine se Windows wali):
+
+```sh
+sudo make runtime                 # build/pk-runtime.sqfs (Debian minbase, ~37 MiB)
+make iso WITH_RUNTIME=1           # runtime ISO ke andar -> /opt/pk boot par apne aap
+```
+
+Boot par (ya `pk-runtime start` se) runtime `/opt/pk` par overlay ke saath lag jaata hai:
+
+```sh
+pk-get install -y htop vim wine    # koi bhi Debian package (net: pk_net=dhcp)
+pk-run ./binary ./script.sh ./app.deb ./Setup.exe ./AppImage ./app.jar
+pk-run --info ./file              # type batao (elf / deb / dos-exec / apk / mach-o …)
+pk-run --selftest                 # QA battery: ### PK: APPS-OK ###
+pk-shell                          # runtime ke andar shell        pk-x start weston (GUI)
+```
+
+| app | kya hota hai |
+|---|---|
+| Linux ELF / script / `.deb` / `.rpm` / AppImage / `.jar` | ✅ chalti hai (`.deb` me dpkg ho to wahi, warna in-house `ar`+tar extract + launcher) |
+| Windows `.exe` / `.msi` | ✅ **Wine se** (`pk-get install -y wine`); Wine na ho to `pk-run` exact command bataake rc 72 deta hai |
+| Android `.apk` | ❌ direct nahi — Android runtime (binderfs + apna kernel) chahiye; `pk-run` **Waydroid** ka raasta batata hai |
+| macOS `.app` / `.dmg` / Mach-O | ❌ Linux kernel Mach-O ko execute nahi kar sakta (Darwin chahiye) → `pk-vm` se macOS guest; `pk-run` saaf reason deta hai |
+
+Poora doc (runtime kaise banane/kahaan rakhane kare, persistence, GUI, `pk_apps_get=`, QA
+modes, troubleshooting): **[docs/APPS.md](docs/APPS.md)**
+
+## 6. Kaise kaam karta hai (2 min ka tour)
+
+1. **GRUB** (ISO ke andar) `linux /boot/pk-kernel` + `initrd /boot/pk-initrd` load karta hai.
+2. **/init** (initramfs) `devtmpfs/proc/sys` mount karta hai, `/mods` se loop+squashfs+overlay+ext4+iso9660
+   load karta hai, phir **har disk + partition** ko try karta hai — jispe `/live/pk.sqfs` mile wahi
+   boot media hai (`/dev/sdb` poora-disk hota hai jab ISO `dd` ki ho, isliye partition nahi disk bhi try hota hai).
+3. squashfs **read-only** mount (`/ro`) + **overlayfs** (`upper` = tmpfs, ya `PK-PERSIST` partition)
+   → `run-init` se `/newroot/sbin/init` (busybox init) `exec` hota hai.
+4. `/etc/inittab` → `::sysinit:/sbin/pk-boot` → hostname, `/etc/default/pk`, boot hooks
+   (`/etc/pk-boot.d/S*`), optional DHCP/SSH, motd, aur `### PK: BOOT-OK ###` marker (serial QA ke liye).
+5. `tty1-4` par `pk-console` → live me autologin, installed me `getty`+login.
+
+**Live = ephemeral by design**: sab writes RAM overlay me, reboot pe reset.
+Changes bachane ke do raaste: `persistent` boot option (USB pe hi partition) ya permanent install.
+
+## 7. License / credit
+
+MIT (see [LICENSE](LICENSE)). Isme koi nayi baat nahi — Linux kernel, busybox, squashfs-tools,
+GRUB, xorriso, e2fsprogs, parted ka kaam ek saath joda gaya hai, sab apni-apni license pe.

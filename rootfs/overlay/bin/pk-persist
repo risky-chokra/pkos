@@ -1,0 +1,31 @@
+#!/bin/sh
+# pk's OS :: boot USB ke baad free space me persistence partition banata hai
+# phir boot option "persistent" (ya grub me toram+nikaal) use karo.
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+set -u
+have() { command -v "$1" >/dev/null 2>&1; }
+have parted || { echo "parted chahiye"; exit 1; }
+DEV=${1:-$(sed -n '1p' /run/pk/live-media 2>/dev/null)}
+[ -n "$DEV" ] || { echo "usage: pk-persist /dev/sdX  (ya live media auto-detect ke liye /run/pk/live-media chahiye)"; exit 1; }
+case "$DEV" in /dev/*) : ;; *) DEV=/dev/$DEV ;; esac
+[ -b "$DEV" ] || { echo "no such device: $DEV"; exit 1; }
+LAST=$(parted -s -m "$DEV" unit MiB print 2>/dev/null | awk -F: '/^[0-9]+:/ { if ($3+0 > e) e=$3+0 } END { print e+0 }')
+TOTAL=$(( $(cat /sys/block/${DEV#/dev/}/size) / 2048 ))
+FREE=$(( TOTAL - LAST ))
+echo "device=$DEV  used=${LAST}MiB  total=${TOTAL}MiB  free=${FREE}MiB"
+[ "$FREE" -gt 128 ] || { echo "128MiB se kam free space - persistence nahi banegi"; exit 1; }
+parted -s "$DEV" mkpart persist ext4 "${LAST}MiB" 100% || { echo "mkpart fail (partition table protected ho sakta hai)"; exit 1; }
+partprobe "$DEV" 2>/dev/null
+# naya partition node dhoondo: /sys se last partition (lsblk par depend na kare)
+d=${DEV#/dev/}
+pn=$(ls -1 /sys/block/$d/${d}* 2>/dev/null | sed "s|.*/||" | grep -E '[0-9]$' | tail -1)
+[ -n "$pn" ] || pn="${d}2"
+echo "partition: /dev/$pn"
+partprobe "$DEV" 2>/dev/null; sleep 1
+[ -b "/dev/$pn" ] || { echo "  partition node nahi bana - reboot karke 'parted' se dobara try karo"; exit 1; }
+mkfs.ext4 -q -F -L PK-PERSIST "/dev/$pn" || { echo "mkfs fail"; exit 1; }
+mkdir -p /mnt/p
+mount "/dev/$pn" /mnt && mkdir -p /mnt/pk-persist && umount /mnt
+echo
+echo "OK - ab reboot karo aur grub me 'pk's OS (live: persistent)' chuno."
+echo "changes us USB partition pe save honge."

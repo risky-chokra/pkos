@@ -1,0 +1,267 @@
+#!/bin/sh
+# pk's OS :: sysinit  (inittab ::sysinit se chalta hai)
+# mounts ok karo, hostname, banner, network/ssh, install/autostep, phir inittab getty/shell spawn karega.
+# shellcheck shell=sh disable=SC3030,SC2086
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export PATH
+umask 022
+
+have() { command -v "$1" >/dev/null 2>&1; }
+has()  { grep -q -- "$1" /proc/cmdline 2>/dev/null; }
+note() { printf 'pk-boot: %s\n' "$*"; }
+dbg()  { [ "$PK_DEBUG" = 1 ] && printf 'pk-boot(dbg): %s\n' "$*"; return 0; }
+
+# kernel messages console par na dikhein (boot clean rahe)
+dmesg -n 1 2>/dev/null
+
+mkdir -p /run/lock /run/network /var/log /var/tmp /tmp /dev/shm /mnt /media
+[ -L /etc/mtab ] || ln -sf /proc/mounts /etc/mtab 2>/dev/null
+
+MODE=live
+[ -f /run/pk/mode ] && MODE=$(cat /run/pk/mode)
+PK_DEBUG=0
+grep -q pk_debug /proc/cmdline && PK_DEBUG=1
+[ "$PK_DEBUG" = 1 ] && dmesg -n 7 2>/dev/null
+
+# hostname
+[ -f /etc/hostname ] && hostname "$(cat /etc/hostname)"
+
+# live vs installed: installed system me password prompt default
+if [ -e /etc/pk-installed ] && ! grep -qE 'pk_autologin|swape_autologin' /proc/cmdline; then
+  : > /run/pk/require-login
+fi
+[ "$MODE" = live ] && : > /run/pk/live
+
+# console: UTF-8 + font (agar ship kiya ho)
+if have loadfont; then
+  for f in /usr/share/consolefonts/Uni2-Fixed16.psf.gz /usr/share/consolefonts/Lat15-Terminus16.psf.gz; do
+    [ -f "$f" ] && { zcat "$f" 2>/dev/null | loadfont 2>/dev/null && break; }
+  done
+fi
+[ -f /etc/keymap ] && have loadkmap && loadkmap < /etc/keymap 2>/dev/null
+
+# defaults file
+PK_DHCP=no
+PK_SSH=no
+[ -f /etc/default/pk ] && . /etc/default/pk
+[ -f /etc/default/swape ] && . /etc/default/swape 2>/dev/null   # legacy image
+# legacy names (SwapeOS 1.0 ke images) -> naye vars
+[ -n "${SWAPE_DHCP:-}" ] && PK_DHCP=${PK_DHCP:-$SWAPE_DHCP}
+[ -n "${SWAPE_SSH:-}" ]  && PK_SSH=${PK_SSH:-$SWAPE_SSH}
+[ -n "${SWAPE_ISSUE:-}" ] && PK_ISSUE=${PK_ISSUE:-$SWAPE_ISSUE}
+[ -f /run/pk/boot.env ] && . /run/pk/boot.env
+
+# ------------------------------------------------------------------ network / ssh
+# boot options config ko override kar sakte hain (files me ${VAR:-default} pattern hai)
+[ "${NETCFG:-}" = dhcp ] && PK_DHCP=yes
+export PK_DHCP PK_SSH
+# (SSH/net hooks S20net/S30ssh se hi chalte hain - yahan dobara start na karo)
+
+# ------------------------------------------------------------------ boot hooks
+for h in /etc/pk-boot.d/S[0-9][0-9]*; do
+  [ -x "$h" ] || continue
+  dbg "hook: $h"
+  "$h" 2>&1 | sed 's/^/[hook] /'
+done
+
+# ------------------------------------------------------------------ banner
+{
+  printf '\n'
+  [ -f /etc/motd ] && cat /etc/motd
+  printf '\n### PK: BOOT-OK mode=%s kernel=%s media=%s ###\n' \
+    "$MODE" "$(uname -r)" "$(cat /run/pk/media 2>/dev/null || cat /run/pk/rootdev 2>/dev/null || echo installed?)"
+} > /dev/console 2>/dev/null || true
+
+# keymap (console + GUI) - pk_keymap=in
+KMAP=$(tr ' ' '\n' < /proc/cmdline 2>/dev/null | sed -n 's/^pk_keymap=//p' | head -1)
+if [ -n "${KMAP:-}" ] && (command -v pk-keymap >/dev/null 2>&1); then
+  pk-keymap "$KMAP" >/dev/null 2>&1 && say "keymap: $KMAP" || say "keymap '$KMAP' poora set nahi hua"
+fi
+# pendrive hardware check (real PC test ke liye) - pk_check=1
+if has pk_check=1 || has pk_check=on; then
+  # runtime attach (S50runtime hook) background me hota hai -> thora wait, taaki
+  # report me runtime/apps wali lines khali na aayein
+  jw=0
+  while [ $jw -lt 8 ]; do
+    grep -q ' /opt/pk ' /proc/mounts 2>/dev/null && break
+    sleep 1; jw=$((jw + 1))
+  done
+  say "pk-check chal raha hai (runtime wait ${jw}s; report: /run/pk/check.txt)"
+  pk-check --save --verbose > /run/pk/check.out 2>&1
+  say "pk-check done (rc=$?) - poori report: less /run/pk/check.txt"
+fi
+# desktop session (apps+wala ISO real PC pe kholne ke liye) - pk_desktop=1
+if has pk_desktop=1 || has pk_desktop=on; then
+  say "pk-desktop start (weston/Xvfb; detail /run/pk/x.log)"
+  pk-desktop start >/run/pk/desktop.log 2>&1 || say "pk-desktop fail (log: /run/pk/desktop.log)"
+fi
+
+# ------------------------------------------------------------------ autoinstall (grub menu se)
+if [ -f /run/pk/boot.env ]; then
+  . /run/pk/boot.env
+  if [ -n "${INSTALLDEV:-}" ]; then
+    note "autoinstall shuru (target=$INSTALLDEV)"
+    # boot option se chalne wala install unattended hota hai -> --yes hamesha
+    # (sirf 'ask' mode me installer khud poochta hai). Silent = output file me.
+    rc=0
+    iopt="--yes"
+    [ -n "${ROOTPW:-}" ] && iopt="$iopt --root-password=$ROOTPW"
+    [ -n "${INSTUSER:-}" ] && iopt="$iopt --user=$INSTUSER"
+    [ -n "${INSTUSERPW:-}" ] && iopt="$iopt --user-password=$INSTUSERPW"
+    if [ "$INSTALLDEV" = ask ]; then
+      echo "[install] interactive mode - pk-install khud poochhega" > /dev/console
+      /sbin/pk-install --target= ; rc=$?
+    elif [ "${SILENT:-0}" = 1 ]; then
+      ilog=/run/pk-install.log
+      sh -c "/sbin/pk-install --target=$INSTALLDEV $iopt > $ilog 2>&1"
+      rc=$?
+      echo "[install] rc=$rc logsize=$(wc -c < "$ilog" 2>&1)" > /dev/console
+      echo "--- pk-install.log ---" > /dev/console
+      tail -60 "$ilog" > /dev/console
+      echo "--- end pk-install.log ---" > /dev/console
+    else
+      /sbin/pk-install --target="$INSTALLDEV" $iopt ; rc=$?
+    fi
+    echo "### PK: INSTALL-DONE rc=$rc ###" > /dev/console
+    if [ "${HALT:-0}" = 1 ]; then
+      echo "### PK: POWER-OFF ###" > /dev/console
+      sync
+      poweroff -f 2>/dev/null || poweroff
+    fi
+  fi
+fi
+
+# ------------------------------------------------------------------ self test (make test)
+if has 'pk_selftest'; then
+  echo "### PK: SELFTEST-BEGIN mode=$MODE ###"
+  echo "selftest: kernel $(uname -r)  mode=$MODE  media=$(cat /run/pk/media 2>/dev/null || echo installed)"
+  grep ' / ' /proc/mounts | sed 's|^|selftest: root = |'
+  echo probe > /tmp/pk-probe && rm -f /tmp/pk-probe && echo "selftest: /tmp writable"
+  echo probe > /run/pk-probe && rm -f /run/pk-probe && echo "selftest: /run writable"
+  if [ -d /live-base ]; then
+    echo "selftest: squashfs base mounted read-only"
+    if touch /live-base/.should-fail 2>/dev/null; then echo "selftest: WARNING base writable?"; else echo "selftest: base is read-only (expected)"; fi
+    rm -f /live-base/.should-fail 2>/dev/null
+  fi
+  [ -x /bin/busybox ] && echo "selftest: busybox $(/bin/busybox 2>/dev/null | head -1 | awk '{print $2}')"
+  [ -e /live-iso/live/pk.sqfs ] && echo "selftest: live medium visible at /live-iso"
+  [ -d /lib/modules ] && echo "selftest: /lib/modules present ($(ls /lib/modules 2>/dev/null | head -1))"
+  # installer + admin tools chal sakte hain? (dynamic linking / lib closure ka real test)
+  depfail=""
+  for t in parted blkid lsblk findmnt losetup mke2fs e2fsck mkfs.vfat tune2fs wipefs \
+           grub-install grub-mkimage grub-probe tar gzip; do
+    tp=$(command -v "$t" 2>/dev/null) || { depfail="$depfail $t(missing)"; continue; }
+    "$t" --version >/dev/null 2>&1
+    trc=$?
+    # 127 = loader/lib nahi mila / 126 = exec nahi kar paya -> wahi asli problem hai
+    # (busybox applets --version par usage error dete hain, wo normal hai)
+    if [ "$trc" = 127 ] || [ "$trc" = 126 ]; then depfail="$depfail $t(cant-exec:$tp)"; fi
+  done
+  if [ -z "$depfail" ]; then
+    echo "### PK: DEPS-OK ###"
+  else
+    echo "### PK: DEPS-FAIL:$depfail ###"
+    echo "pk: tools missing/broken:$depfail" > /dev/kmsg 2>/dev/null
+  fi
+  # network + ssh (async hote hain -> chhota wait; QEMU user-net me 10.0.2.15 milta hai)
+  if [ "${PK_DHCP:-no}" = yes ]; then
+    i=0
+    while [ $i -lt 15 ]; do
+      ip=$(ip -4 addr show 2>/dev/null | awk '/inet /{if($2!~/^127\./){split($2,a,"/");print a[1]; exit}}')
+      [ -n "$ip" ] && break
+      sleep 1; i=$((i + 1))
+    done
+  fi
+  if [ "${PK_SSH:-no}" = yes ]; then
+    i=0
+    while [ $i -lt 15 ]; do
+      pidof dropbear >/dev/null 2>&1 && break
+      sleep 1; i=$((i + 1))
+    done
+  fi
+  if [ -n "${ip:-}" ]; then echo "### PK: NET-OK ($ip) ###"
+  elif [ "${PK_DHCP:-no}" = yes ]; then
+    echo "### PK: NET-FAIL (DHCP ko IP nahi mila) ###"
+    echo "--- pk-net.log ---" >> /dev/console 2>/dev/null
+    tail -8 /var/log/pk-net.log 2>/dev/null | sed 's/^/  net-log: /'
+    echo "--- NIC ---" >> /dev/console 2>/dev/null
+    ls /sys/class/net 2>&1 | sed 's/^/  ifaces: /' | head -4
+    command -v modprobe >/dev/null 2>&1 && lsmod 2>/dev/null | sed -n 's/^\([a-z0-9_]*\).*/  mod: \1/p' | grep -iE "virtio_net|e1000|r8169|tg3|usb_lan" | head -3
+  fi
+  if pidof dropbear >/dev/null 2>&1; then echo "### PK: SSH-OK (dropbear :22) ###"
+  elif [ "${PK_SSH:-no}" = yes ]; then echo "### PK: SSH-FAIL (dropbear nahi chala) ###"
+    tail -5 /var/log/pk-ssh.log 2>/dev/null | sed 's/^/  ssh-log: /'; fi
+  APPSGET=$(tr ' ' '\n' < /proc/cmdline 2>/dev/null | sed -n 's/^pk_apps_get=//p')
+  if [ -n "${APPSGET:-}" ]; then
+    # net aane do (apt ke liye), phir install + run
+    j=0
+    while [ $j -lt 20 ]; do
+      ip2=$(ip -4 addr show 2>/dev/null | awk '/inet /{if($2!~/^127\./){print $2; exit}}')
+      [ -n "${ip2:-}" ] && break
+      sleep 1; j=$((j + 1))
+    done
+    note "pk_apps_get: runtime me install + run try (net=${ip2:-none}, ${j}s me)"
+    for spec in $APPSGET; do
+      pkg=${spec%%:*}; args=${spec#*:}
+      [ "$args" = "$spec" ] && args=""
+      note "  installing $pkg"
+      if pk-get install -y -o "Acquire::Retries=2" "$pkg" > /run/pk/apps-get.log 2>&1; then
+        found=""
+        for d in /opt/pk/usr/bin /opt/pk/usr/games /opt/pk/bin /opt/pk/usr/local/bin /opt/pk/usr/sbin; do
+          { [ -x "$d/$pkg" ] || [ -e "$d/$pkg" ] || [ -L "$d/$pkg" ]; } && { found=$d/$pkg; break; }
+        done
+        if [ -n "$found" ]; then
+          # shellcheck disable=SC2086
+          out=$(pk-run "$pkg" $args 2>&1 | head -3 | tr '\n' '|' | cut -c1-140)
+          printf '### PK: APPS-GET-OK (%s) %s ###\n' "$pkg" "$out"
+        else
+          printf '### PK: APPS-GET-INSTALLED (%s) koi /usr/bin binary nahi mili ###\n' "$pkg"
+        fi
+      else
+        printf '### PK: APPS-GET-FAIL (%s) %s ###\n' "$pkg" "$(tail -c 200 /run/pk/apps-get.log 2>/dev/null | tr '\n' '|')"
+      fi
+    done
+  fi
+  if [ -x /sbin/pk-run ]; then
+    /sbin/pk-run --selftest >/run/pk/apps-selftest.log 2>&1
+    rc=$?
+    if [ "$rc" != 0 ]; then
+      oneline=$(tail -c 900 /run/pk/apps-selftest.log 2>/dev/null | tr '\n' '|')
+      printf '### PK: APPS-SELFTEST-LOG rc=%s %s ###\n' "$rc" "${oneline:-<khaali>}" > /dev/console 2>/dev/null
+      printf 'APPS-SELFTEST-LOG rc=%s %s\n' "$rc" "${oneline:-<khaali>}" > /dev/kmsg 2>/dev/null
+    fi
+  fi
+  if [ -e /run/pk-persist-on ]; then
+    if [ -f /root/.pk-persist-marker ]; then
+      echo "### PK: PERSIST-KEPT ###"
+    else
+      echo "boot $(uname -r) at $(date 2>/dev/null)" > /root/.pk-persist-marker 2>/dev/null \
+        && echo "### PK: PERSIST-WROTE ###" || echo "### PK: PERSIST-FAIL ###"
+    fi
+  fi
+  # installed vs live login policy + shadow sanity (QA markers)
+  rh=$(sed -n '1p' /etc/shadow 2>/dev/null | cut -d: -f2)
+  case "$rh" in
+    \$[56y]\$*) echo "### PK: PASSWD-OK (root hash type sha-$(printf %s "$rh" | cut -d\$ -f2)) ###" ;;
+    ""|"*"|"!"|"*!") echo "### PK: PASSWD-LOCKED (root login band) ###" ;;
+    *) echo "### PK: PASSWD-SKIP (hash field: $rh) ###" ;;
+  esac
+  if [ -f /etc/pk-installed ]; then
+    if [ -f /run/pk/require-login ]; then
+      echo "### PK: LOGIN-REQUIRED ###"
+    else
+      echo "### PK: LOGIN-REQUIRED-MISSING (installed system autologin kar raha?!) ###"
+    fi
+  else
+    echo "### PK: LIVE-AUTOLOGIN ###"
+  fi
+  echo "### PK: SELFTEST-OK ###"
+fi
+
+if has 'pk_poweroff'; then
+  echo "### PK: POWER-OFF-NOW ###"
+  sync
+  poweroff -f 2>/dev/null || poweroff -f
+fi
+
+exit 0

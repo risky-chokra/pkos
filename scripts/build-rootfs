@@ -1,0 +1,226 @@
+#!/bin/sh
+# pk's OS :: live rootfs staging -> build/work/rootfs
+# Ye tree squashfs banakar ISO me jaati hai. Root lagta nahi hai.
+# shellcheck shell=sh disable=SC2086,SC3030
+set -eu
+
+PK_ROOT=$(cd "$(dirname "$0")/.." && pwd); export PK_ROOT
+# shellcheck disable=SC1091
+. "$PK_ROOT/scripts/pk.sh"
+
+OV=$WORK/rootfs
+# ISO stage har baar fresh: warna rename/purane naam ke boot-live files (jaise
+# swape-kernel, swape.sqfs) naye files ke saath ISO me ghus jaate hain (size double).
+rm -rf "$WORK/iso"
+log "live rootfs staging -> $OV"
+resolve_kernel
+
+wipe "$OV"
+mkdir -p "$OV"
+
+# ---------------------------------------------------------------- skeleton
+for d in bin sbin etc etc/pk-boot.d etc/ssl/certs root root/.bin home/pk \
+         lib lib/modules usr usr/bin usr/sbin usr/lib usr/share var var/log var/tmp \
+         var/lib var/lib/misc mnt media live opt opt/pk opt/pk/apps run tmp proc sys dev boot newroot; do
+  mkdir -p "$OV/$d"
+done
+chmod 1777 "$OV/tmp" "$OV/var/tmp"
+ln -sfn /proc/self/mounts "$OV/etc/mtab"
+
+# ---------------------------------------------------------------- overlay config (repo se)
+if [ -d "$PK_ROOT/rootfs/overlay" ]; then
+  ( cd "$PK_ROOT/rootfs/overlay" && tar -cf - . ) | ( cd "$OV" && tar -xf - )
+else
+  warn "rootfs/overlay nahi mila -> khaali rootfs banegi"
+fi
+
+# ---------------------------------------------------------------- overlay script hygiene
+# mode bhoolna common footgun hai (git tar/zip se +x ud jaata hai) -> yahan fix
+for f in "$OV"/sbin/pk-* "$OV"/bin/pk-* "$OV"/etc/pk-boot.d/S*; do
+  [ -f "$f" ] || continue
+  chmod 755 "$f"
+  sh -n "$f" || die "syntax error in $f"
+done
+
+# ---------------------------------------------------------------- busybox (static)
+BUSYBOX=${PK_BUSYBOX:-}
+if [ -z "$BUSYBOX" ]; then
+  for c in /bin/busybox /usr/bin/busybox /bin/busybox.static /usr/bin/busybox-static \
+           /usr/lib/busybox/bin/busybox; do
+    [ -x "$c" ] || continue
+    if ! ldd "$c" 2>/dev/null | grep -q '=> /'; then BUSYBOX=$c; break; fi
+    [ -z "$BUSYBOX" ] && BUSYBOX=$c
+  done
+fi
+[ -n "$BUSYBOX" ] || die "static busybox nahi mila -> sudo apt install busybox-static"
+log "busybox: $BUSYBOX"
+install -m 0755 "$BUSYBOX" "$OV/bin/busybox"
+for d in bin sbin usr/bin usr/sbin; do mkdir -p "$OV/$d"; done
+"$OV/bin/busybox" --list 2>/dev/null | while read -r app; do
+  case "$app" in ''|*/*) continue ;; esac
+  for d in bin sbin usr/bin usr/sbin; do
+    t=$OV/$d/$app
+    [ -e "$t" ] || [ -L "$t" ] || ln -sf /bin/busybox "$t"
+  done
+done
+
+# ---------------------------------------------------------------- root password
+if [ -n "${LIVE_PASS:-}" ]; then
+  hash=$("$OV/bin/busybox" mkpasswd -m sha-512 "$LIVE_PASS" 2>/dev/null || \
+         (have openssl && openssl passwd -6 "$LIVE_PASS" 2>/dev/null) || echo '')
+  if [ -n "$hash" ]; then
+    if [ -f "$OV/etc/shadow" ]; then
+      sed -i "1s|^\(root:\)[^:]*|\1$hash|" "$OV/etc/shadow"
+    fi
+    log "root password set (live: '$LIVE_PASS')"
+  else
+    warn "passwd hash nahi bana paya (busybox mkpasswd/openssl missing) - /etc/shadow waisa hi rahega"
+  fi
+fi
+
+# ---------------------------------------------------------------- host binaries + libs
+if [ -f "$PK_ROOT/config/live-bins.txt" ]; then
+  log "host binaries + shared libs collect..."
+  # shellcheck disable=SC2046
+  "$PK_ROOT/scripts/collect-bins" "$OV" \
+    $(grep -vE '^[[:space:]]*(#|$)' "$PK_ROOT/config/live-bins.txt") \
+    2>&1 | grep -v '^  skip' | sed 's/^/    /' || true
+  # /usr/bin wale ko /bin me, /usr/sbin wale ko /sbin me mirror karo
+  for b in $(grep -vE '^[[:space:]]*(#|$)' "$PK_ROOT/config/live-bins.txt"); do
+    for src in "$OV/usr/bin/$b" "$OV/usr/sbin/$b"; do
+      [ -e "$src" ] || continue
+      for d in bin sbin; do
+        t=$OV/$d/$b
+        [ -e "$t" ] || [ -L "$t" ] || ln -s "../$d/$b" "$t" 2>/dev/null || ln -s "$src" "$t"
+      done
+      break
+    done
+  done
+fi
+# ------------------------------------------------------------- compat aliases
+# SwapeOS 1.0 ke users/docs ke liye purane naam bhi kaam karein
+for c in "$OV"/sbin/pk-* "$OV"/bin/pk-*; do
+  [ -f "$c" ] || continue
+  ln -sf "/${c#"$OV"/}" "$OV/$(dirname "${c#"$OV"}")/swape-$(basename "$c" | sed 's/^pk-//')" 2>/dev/null || true
+done
+[ -d "$OV/etc/pk-boot.d" ] && ln -sfn pk-boot.d "$OV/etc/swape-boot.d" 2>/dev/null || true
+
+# udhcpc ka compiled-in default path /etc/udhcpc/default.script hota hai
+mkdir -p "$OV/etc/udhcpc"
+[ -f "$OV/usr/share/udhcpc/default.script" ] && ln -sf /usr/share/udhcpc/default.script "$OV/etc/udhcpc/default.script"
+
+for f in /etc/mke2fs.conf /etc/blkid.conf /etc/e2fsck.conf; do
+  [ -e "$f" ] && { cp -pL "$f" "$OV$f" 2>/dev/null || true; }
+done
+
+# ---------------------------------------------------------------- grub (installer ko chahiye)
+if [ -d /usr/lib/grub ]; then
+  log "grub module dirs copy (/usr/lib/grub)"
+  mkdir -p "$OV/usr/lib"
+  cp -a /usr/lib/grub "$OV/usr/lib/" 2>/dev/null || true
+  rm -rf "$OV/usr/lib/grub"/arm64-efi "$OV/usr/lib/grub"/i386-pc-uefi 2>/dev/null || true
+  [ -d /usr/share/grub ] && cp -a /usr/share/grub "$OV/usr/share/" 2>/dev/null
+  for g in i386-pc x86_64-efi; do
+    [ -d "$OV/usr/lib/grub/$g" ] || warn "grub $g modules nahi mile (installer ka $g boot fail ho sakta hai)"
+  done
+else
+  warn "/usr/lib/grub nahi mila -> installer grub-install nahi kar payega (sudo apt install grub-pc-bin grub-efi-amd64-bin)"
+fi
+
+# ---------------------------------------------------------------- firmware (optional)
+if [ "${PK_FIRMWARE:-0}" = 1 ] && [ -d /usr/lib/firmware ]; then
+  log "firmware copy (PK_FIRMWARE=1)"
+  mkdir -p "$OV/usr/lib"
+  cp -a /usr/lib/firmware "$OV/usr/lib/" 2>/dev/null || true
+fi
+
+# ---------------------------------------------------------------- kernel modules (live system wale)
+if [ -f "$PK_ROOT/config/live-modules.txt" ] && [ -d "$PK_MODULES" ]; then
+  log "kernel modules copy (curated set)..."
+  mkdir -p "$OV/lib/modules/$KVER"
+  (
+    cd "$PK_MODULES" || exit 0
+    while read -r pat; do
+      case "${pat:-}" in ''|'#'*) continue ;; esac
+      find $pat -name '*.ko*' -print 2>/dev/null || true
+    done < "$PK_ROOT/config/live-modules.txt"
+  ) | sort -u > "$WORK/live-modules.list"
+  # dependency closure: copied drivers ko jo modules chahiye (jaise virtio_net ->
+  # net_failover/failover) woh host ke modules.dep se utha ke add kar lete hain,
+  # warna modprobe insmod par "Unknown symbol" de kar fail ho jata hai.
+  if [ -f "$PK_MODULES/modules.dep" ] && have awk; then
+    awk '
+      NR==FNR { need[$1]=1; next }
+      { t=index($0,":"); if (t>0) { m=substr($0,1,t-1); d[m]=substr($0,t+1) } }
+      END {
+        ch=1
+        while (ch) { ch=0; for (m in need) { n=split(d[m],a," ")
+              for (i=1;i<=n;i++) if (a[i]!="" && !(a[i] in need)) { need[a[i]]=1; ch=1 } } }
+        for (m in need) print m
+      }' "$WORK/live-modules.list" "$PK_MODULES/modules.dep" | sort -u > "$WORK/live-modules.full.list"
+    if [ -s "$WORK/live-modules.full.list" ]; then
+      mv "$WORK/live-modules.full.list" "$WORK/live-modules.list"
+    fi
+  fi
+  n=0
+  while read -r m; do
+    [ -n "$m" ] || continue
+    mkdir -p "$OV/lib/modules/$KVER/$(dirname "$m")"
+    cp -pL "$PK_MODULES/$m" "$OV/lib/modules/$KVER/$m" 2>/dev/null || true
+    n=$((n + 1))
+  done < "$WORK/live-modules.list"
+  for f in modules.builtin modules.order; do
+    [ -e "$PK_MODULES/$f" ] && cp -pL "$PK_MODULES/$f" "$OV/lib/modules/$KVER/" 2>/dev/null || true
+  done
+  [ -e "/boot/System.map-$KVER" ] && cp -pL "/boot/System.map-$KVER" "$OV/lib/modules/$KVER/System.map"
+  if have depmod; then
+    ( depmod -b "$OV" -a "$KVER" > "$WORK/depmod.log" 2>&1 ) || warn "depmod -b fail (log: $WORK/depmod.log)"
+    rm -f "$OV/lib/modules/$KVER/modules."*.tmp 2>/dev/null || true
+  else
+    warn "depmod nahi -> /lib/modules bina modules.dep ke (modprobe kaam nahi karega)"
+  fi
+  log "  $n modules -> /lib/modules/$KVER"
+fi
+
+# ---------------------------------------------------------------- extra shared libs
+# config/live-libs.txt: jo libs ldd direct nahi batata par runtime me chahiye hoti
+# hain (jaise libgcc_s.so.1 -> pthread_exit; iske bina mksquashfs abort karta tha).
+if [ -f "$PK_ROOT/config/live-libs.txt" ]; then
+  nll=0
+  for l in $(grep -vE '^[[:space:]]*(#|$)' "$PK_ROOT/config/live-libs.txt"); do
+    src=""
+    for d in /lib /usr/lib /lib64 /usr/lib64 /lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu; do
+      [ -e "$d/$l" ] && { src=$(readlink -f "$d/$l" 2>/dev/null || printf '%s' "$d/$l"); break; }
+    done
+    [ -n "$src" ] && [ -f "$src" ] || continue
+    for d in /lib /usr/lib; do
+      dst="$OV$d/x86_64-linux-gnu/$l"
+      mkdir -p "$(dirname "$dst")" 2>/dev/null
+      [ -e "$dst" ] || [ -L "$dst" ] || { cp -pL "$src" "$dst" 2>/dev/null && nll=$((nll + 1)); }
+      dst2="$OV$d/$l"
+      [ -e "$dst2" ] || [ -L "$dst2" ] || cp -pL "$src" "$dst2" 2>/dev/null
+    done
+  done
+  [ "$nll" = 0 ] || log "  extra libs copied: $nll"
+fi
+
+# ---------------------------------------------------------------- console keymaps (pk-keymap)
+# builder ke /usr/share/keymaps (kbd package) se chhote .kmap copy karte hain; na
+# mile to pk-keymap sirf GUI side (setxkbmap) karega - isliye warning, error nahi.
+mkdir -p "$OV/usr/share/kmap"
+for l in us de fr es it ru uk in jp; do
+  f=$(ls /usr/share/keymaps/*/*/"$l.kmap.gz" /usr/share/keymaps/*/"$l.kmap.gz" 2>/dev/null | head -1)
+  [ -n "$f" ] || continue
+  if have gzip; then gzip -dc "$f" > "$OV/usr/share/kmap/$l.kmap" 2>/dev/null || cp -p "$f" "$OV/usr/share/kmap/$l.kmap.gz"
+  else cp -p "$f" "$OV/usr/share/kmap/$l.kmap.gz"; fi
+done
+km=$(ls "$OV/usr/share/kmap" 2>/dev/null | wc -l)
+if [ "$km" = 0 ]; then warn "console keymaps nahi mile (builder par 'kbd' install karo) - pk-keymap GUI-only karega"; else log "  $km console keymaps -> /usr/share/kmap"; fi
+
+# ---------------------------------------------------------------- metadata / live marker
+printf '%s\n' "${OS_VERSION:-1.0}" > "$OV/etc/pk-build"
+printf 'kernel=%s\nkver=%s\n' "$(basename "${KERNEL:-vmlinuz}")" "$KVER" > "$OV/etc/pk-build-info"
+echo "live" > "$OV/etc/pk-live-base"
+ln -sfn /bin/busybox "$OV/bin/pk-busybox" 2>/dev/null || true
+
+log "staged: $(du -sh "$OV" 2>/dev/null | cut -f1) (kernel $KVER)"

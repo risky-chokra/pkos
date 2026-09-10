@@ -1,0 +1,133 @@
+#!/bin/sh
+# pk's OS :: initramfs -> build/work/iso/boot/pk-initrd
+#   /init            init/init
+#   /bin/busybox     static busybox + saare applet symlinks
+#   /mods/NN-x.ko    boot modules (dependency order, uncompressed -> busybox insmod chalega)
+#   /sbin/blkid      root=UUID/PARTUUID resolve ke liye
+# shellcheck shell=sh disable=SC3030,SC2086
+set -eu
+PK_ROOT=$(cd "$(dirname "$0")/.." && pwd); export PK_ROOT
+# shellcheck disable=SC1091
+. "$PK_ROOT/scripts/pk.sh"
+
+IR=$WORK/initrd
+OUT=$WORK/iso/boot/pk-initrd
+have cpio  || die "cpio missing -> sudo apt install cpio"
+have gzip  || die "gzip missing"
+resolve_kernel
+
+BUSYBOX=${PK_BUSYBOX:-}
+if [ -z "$BUSYBOX" ]; then
+  for c in /bin/busybox /usr/bin/busybox /bin/busybox.static /usr/bin/busybox-static; do
+    [ -x "$c" ] || continue
+    if ! ldd "$c" 2>/dev/null | grep -q '=> /'; then BUSYBOX=$c; break; fi
+    [ -z "$BUSYBOX" ] && BUSYBOX=$c
+  done
+fi
+[ -n "$BUSYBOX" ] || die "static busybox nahi mila -> sudo apt install busybox-static"
+
+log "initrd staging: $IR"
+wipe "$IR"
+for d in bin sbin dev proc sys run mods mnt etc newroot ro tmp; do mkdir -p "$IR/$d"; done
+install -m 0755 "$BUSYBOX" "$IR/bin/busybox"
+"$IR/bin/busybox" --list | while read -r app; do
+  case "$app" in ''|*/*) continue ;; esac
+  for d in bin sbin; do
+    t=$IR/$d/$app
+    [ -e "$t" ] || [ -L "$t" ] || ln -sf /bin/busybox "$t"
+  done
+done
+install -m 0755 "$PK_ROOT/init/init" "$IR/init"
+
+# ---------------------------------------------------------------- modules
+if [ -d "$PK_MODULES" ] && [ -f "$PK_ROOT/init/kernel-modules" ]; then
+  log "boot modules (dependency closure) copy..."
+  i=10
+  modseen=$WORK/.initrd-modseen; : > "$modseen"
+  : > "$WORK/initrd-modules.log"
+  for name in $(grep -vE '^[[:space:]]*(#|$)' "$PK_ROOT/init/kernel-modules"); do
+    if grep -qx "$name" "$PK_MODULES/modules.builtin" 2>/dev/null; then
+      echo "  = $name (built-in)" >> "$WORK/initrd-modules.log"; continue
+    fi
+    if have modprobe && modprobe --set-version "$KVER" --show-depends "$name" > "$IR/.dep" 2>/dev/null; then
+      :
+    elif have modprobe && modprobe --show-depends --set-version "$KVER" "$name" > "$IR/.dep" 2>/dev/null; then
+      :
+    else
+      echo "insmod $PK_MODULES/kernel/**/$name.ko" > "$IR/.dep"
+      f=$(find "$PK_MODULES" -name "$name.ko*" 2>/dev/null | head -1 || true)
+      [ -n "$f" ] && printf 'insmod %s\n' "$f" > "$IR/.dep" || { rm -f "$IR/.dep"; continue; }
+    fi
+    while read -r _ ko; do
+      [ -n "${ko:-}" ] || continue
+      [ -f "$ko" ] || continue
+      b=${ko##*/}; b=${b%.xz}; b=${b%.gz}; b=${b%.zst}; b=${b%.zstd}; b=${b%.lzma}; b=${b%.ko}
+      # SAME module dobara-copy mat karo (modprobe closure me deps repeat hote hain)
+      grep -qxF "$b" "$modseen" 2>/dev/null && continue
+      tgt=$IR/mods/$(printf '%03d' "$i")-$b.ko
+      case "$ko" in
+        *.xz)   xz   -dc < "$ko" > "$tgt" ;;
+        *.gz)   gzip -dc < "$ko" > "$tgt" ;;
+        *.zst|*.zstd) have zstd || die "zstd missing (sudo apt install zstd) - $ko"; zstd -qc -d "$ko" > "$tgt" ;;
+        *.lzma) lzma -dc < "$ko" > "$tgt" ;;
+        *)      cp "$ko" "$tgt" ;;
+      esac
+      chmod 0644 "$tgt"
+      printf '%s\n' "$b" >> "$modseen"
+      i=$((i + 1))
+    done < "$IR/.dep"
+    rm -f "$IR/.dep"
+  done
+  log "  $(ls "$IR/mods" 2>/dev/null | wc -l) modules in /mods"
+else
+  warn "modules dir nahi mila -> initrd bina /mods (kernel me sab built-in hona chahiye)"
+fi
+
+# ---------------------------------------------------------------- blkid (root= resolve)
+if [ -x "$PK_ROOT/scripts/collect-bins" ]; then
+  "$PK_ROOT/scripts/collect-bins" "$IR" blkid 2>/dev/null | grep -v '^  skip' || true
+  for p in "$IR/usr/sbin/blkid" "$IR/sbin/blkid" "$IR/bin/blkid"; do
+    [ -e "$p" ] || continue
+    ln -sfn "${p#$IR}" "$IR/sbin/blkid" 2>/dev/null
+    ln -sfn "${p#$IR}" "$IR/bin/blkid"  2>/dev/null
+    break
+  done
+fi
+# loader ke liye /lib64 path bhi chahiye
+[ -d "$IR/lib" ] || ln -sfn usr/lib "$IR/lib" 2>/dev/null || mkdir -p "$IR/lib"
+
+# ---------------------------------------------------------------- pack
+mkdir -p "$(dirname "$OUT")"
+# kernel initrd decompressors: /boot/config se dekho (RD_ZSTD/RD_XZ/RD_LZ4...)
+icomp=${INITRD_COMP:-auto}
+cfg=/boot/config-$KVER
+pick() { # <comp> -> 0 agar kernel support kare aur tool ho
+  case $1 in
+    zstd) have zstd || return 1; key=RD_ZSTD ;;
+    xz)   have xz   || return 1; key=RD_XZ   ;;
+    lz4)  have lz4  || return 1; key=RD_LZ4  ;;
+    *)    key=RD_GZIP ;;
+  esac
+  [ -r "$cfg" ] || return 0        # config na mile to trust kernel defaults
+  grep -qE "^CONFIG_$key=y" "$cfg"
+}
+if [ "$icomp" = auto ]; then
+  for c in xz gzip; do
+    if pick "$c"; then icomp=$c; break; fi
+  done
+  [ -n "$icomp" ] || icomp=gzip
+  [ "$icomp" = auto ] && icomp=gzip
+fi
+if ! pick "$icomp"; then warn "$icomp initrd me support nahi -> gzip"; icomp=gzip; fi
+pack() {
+  case $icomp in
+    xz)   xz -9 --check=crc32 -T0 ;;
+    lz4)  lz4 -12 -q ;;
+    zstd) zstd -19 -T0 -q ;;
+    *)    gzip -9n ;;
+  esac
+}
+log "packing (cpio + $icomp)..."
+normalize_tree "$IR"
+( cd "$IR" && LC_ALL=C find . -print0 | LC_ALL=C cpio --null -o -H newc -R 0:0 2>/dev/null ) | pack > "$OUT"
+log "  -> $OUT ($(du -h "$OUT" | cut -f1))"

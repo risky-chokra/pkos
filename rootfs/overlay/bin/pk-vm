@@ -1,0 +1,85 @@
+#!/bin/sh
+# pk's OS :: guest VM helper (Windows / macOS / Android-x86 / koi bhi ISO)
+#   pk-vm new  <name> --size=40G
+#   pk-vm run  <name> [--cdrom=x.iso] [--ram=4096] [--cpus=2] [--uefi] [--vnc=:1]
+#   pk-vm run  --image=<qcow2|raw> [--cdrom=...]
+#   pk-vm list
+# QEMU runtime ke andar se use hota hai: pk-get install -y qemu-system-x86 ovmf
+set -u
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+RT=${PK_RUNTIME_ROOT:-/opt/pk}
+VMDIR=${PK_VM_DIR:-$HOME/pk-vms}
+say() { printf 'pk-vm: %s\n' "$*"; }
+err() { printf 'pk-vm: %s\n' "$*" >&2; }
+qemu() {
+  if [ -x "$RT/usr/bin/qemu-system-x86_64" ]; then echo "chroot"; return 0; fi
+  command -v qemu-system-x86_64 >/dev/null 2>&1 && { echo "host"; return 0; }
+  return 1
+}
+run_in() { # <mode> <args...>
+  m=$1; shift
+  if [ "$m" = chroot ]; then pk-chroot "$@"; else "$@"; fi
+}
+norm() { printf '%s' "$1" | tr -cd 'a-zA-Z0-9._-'; }
+
+case "${1:-}" in
+  new)
+    shift; name=${1:?usage: pk-vm new <name> --size=40G}; shift
+    size=40G
+    for a in "$@"; do case "$a" in --size=*) size=${a#*=} ;; esac; done
+    mkdir -p "$VMDIR"; name=$(norm "$name")
+    img=$VMDIR/$name.qcow2
+    if [ -x "$RT/usr/bin/qemu-img" ]; then pk-chroot /usr/bin/qemu-img create -f qcow2 "$img" "$size" >/dev/null
+    elif command -v qemu-img >/dev/null 2>&1; then qemu-img create -f qcow2 "$img" "$size" >/dev/null
+    else dd if=/dev/zero of="$VMDIR/$name.raw" bs=1M count=0 seek=$(( $(echo "$size" | tr -dc 0-9) * 1024 )) >/dev/null 2>&1; img=$VMDIR/$name.raw; fi
+    say "created: $img" ;;
+  list) ls -l "$VMDIR" 2>/dev/null | sed 's/^/  /' || say "$VMDIR khali" ;;
+  run)
+    shift; name=; cdrom=; ram=2048; cpus=2; uefi=0; vnc=":1"; extra=""; macos=0; agreed=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --cdrom=*) cdrom=${1#*=} ;; --image=*) name=$(basename "${1#*=}"); VMDIR=$(dirname "${1#*=}") ;;
+        --ram=*) ram=${1#*=} ;; --cpus=*) cpus=${1#*=} ;; --uefi) uefi=1 ;; --vnc=*) vnc=${1#*=} ;;
+        --macos) macos=1 ;; --i-know-the-license) agreed=1 ;;
+        --) shift; break ;;
+        -*) err "unknown: $1"; exit 1 ;;
+        *) [ -z "$name" ] && name=$1 ;;
+      esac
+      shift
+    done
+    mode=$(qemu) || { err "qemu nahi mila. Runtime me install karo:"; err "  pk-get install -y qemu-system-x86 ovmf"; err "(ya host pe: sudo apt-get install -y qemu-system-x86)"; exit 64; }
+    img=""
+    if [ -n "$name" ]; then
+      for c in "$VMDIR/$name.qcow2" "$VMDIR/$name.raw" "$VMDIR/$name"; do
+        [ -f "$c" ] && { img=$c; break; }
+      done
+      [ -n "$img" ] || { err "disk image nahi mila: $name (pehle: pk-vm new $name --size=40G)"; exit 1; }
+    fi
+    if [ "$macos" = 1 ] && [ "$agreed" != 1 ]; then
+      err "macOS guest: Apple ka EULA ise sirf Apple hardware par chalne deta hai."
+      err "isliye maine rok diya. Samajhdaari ke saath aage badhna ho to --i-know-the-license add karo."
+      err "aur bhi chahiye: CPU virtualization (grep -c -E 'vmx|svm' /proc/cpuinfo > 0), OpenCore/extra kexts, OVMF."
+      exit 66
+    fi
+    set -- -name guest="${name:-pk-guest}" -machine q35 -m "$ram" -smp "$cpus" \
+           -drive "if=virtio,file=$img" -netdev "user,id=n0" -device "virtio-net-pci,netdev=n0" \
+           -vga std -usb -device usb-tablet -vnc "$vnc"
+    [ -n "$cdrom" ] && set -- "$@" -cdrom "$cdrom" -boot d
+    [ "$uefi" = 1 ] && for f in /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd /opt/pk/usr/share/OVMF/OVMF_CODE.fd; do
+      [ -f "$f" ] && set -- "$@" -drive "if=pflash,format=raw,readonly=on,file=$f"
+    done
+    [ "$macos" = 1 ] && set -- "$@" -cpu Penryn,kvm=on,hv_relaxed=1 -device usb-ehci
+    say "VNC: localhost$vnc  (guest dekhne ke liye kisi bhi machine se: vnc <ip>:5900+${vnc#:})"
+    say "cmd: qemu-system-x86_64 $*"
+    run_in "$mode" /usr/bin/qemu-system-x86_64 "$@" ;;
+  *) cat <<USAGE
+pk-vm :: guest VMs (Windows / macOS / Android-x86 / any ISO)
+  pk-vm new <name> --size=40G
+  pk-vm run <name> [--cdrom=installer.iso] [--uefi] [--ram=4096] [--vnc=:1] [--macos --i-know-the-license]
+  pk-vm run --image=/path/disk.qcow2 [--cdrom=x.iso]
+  pk-vm list
+QEMU runtime ke andar se:  pk-get install -y qemu-system-x86 ovmf
+USAGE
+     [ -n "${1:-}" ] && exit 1 ;;
+esac
+exit 0

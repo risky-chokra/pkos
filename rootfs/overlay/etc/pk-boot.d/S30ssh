@@ -1,0 +1,7 @@
+#!/bin/sh
+# boot hook: SSH (dropbear) - installed system me default on
+. /etc/default/pk 2>/dev/null
+[ "${PK_SSH:-no}" = yes ] || exit 0
+[ -x /sbin/pk-ssh ] || exit 0
+pk-ssh start >>/var/log/pk-ssh.log 2>&1
+exit 0

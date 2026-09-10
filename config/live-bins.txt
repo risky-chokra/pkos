@@ -1,0 +1,30 @@
+# Live image me daale jaane wale host binaries (jo busybox me nahi hain).
+# Inke shared libs apne aap copy ho jaate hain (ldd se). Host pe na mila to skip + warn.
+parted
+mkfs.ext4
+mke2fs
+e2fsck
+tune2fs
+swaplabel
+blkid
+wipefs
+lsblk
+findmnt
+losetup
+kmod
+grub-install
+grub-mkimage
+grub-mkconfig
+grub-probe
+grub-bios-setup
+grub-render-label
+mkfs.vfat
+mkswap
+tar
+gzip
+findmnt
+dropbear
+dropbearkey
+# apps layer
+unsquashfs
+mksquashfs

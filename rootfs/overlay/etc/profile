@@ -1,0 +1,12 @@
+export PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+export HOME="${HOME:-/root}"
+export TERM="${TERM:-linux}"
+export PS1='pk:\w\$ '
+umask 022
+alias ll='ls -l'
+alias la='ls -A'
+alias ..='cd ..'
+alias d='dmesg | tail -30'
+[ "$(id -u)" = 0 ] || return 0 2>/dev/null
+# root ko welcome (interactive shells only)
+case $- in *i*) [ -f /etc/motd ] && head -9 /etc/motd ;; esac

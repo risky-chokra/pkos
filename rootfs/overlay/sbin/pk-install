@@ -1,0 +1,411 @@
+#!/bin/sh
+# pk's OS :: disk installer - live image ko internal disk pe copy karta hai
+#                 + partition table + filesystems + GRUB (BIOS aur UEFI dono).
+#
+# usage: pk-install [options]
+#   --target=<dev|auto>   kis disk pe install kare (default: auto = pehli internal disk)
+#   --yes                 confirmation skip (scripted/headless install)
+#   --layout=<hybrid|bios|efi>   default hybrid (BIOS+UEFI dono boot honge)
+#   --size=<MiB>          root partition size (default: pura bacha hua space)
+#   --root-password=<pw>  installed system ka root password
+#   --user=<name>         non-root user bana do (home + groups) ; --user-password=<pw>
+#   --no-runtime-copy     app runtime (pk-runtime.sqfs) installed system me copy mat karo
+#   --hostname=<h>        installed system ka hostname
+#   --no-bootloader       GRUB skip
+#   --info                sirf dikhao kaunsi disk milegi, kuch mat chhedo
+# WARNING: target disk ka pura data mit jaata hai.
+# shellcheck shell=sh disable=SC3030,SC2086
+set -u
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export PATH
+
+TARGET=""
+LAYOUT=hybrid
+YES=0
+ROOTSIZE=""
+ROOTPW=pk
+HOSTN=pk
+NOBOOT=0
+INFOONLY=0
+USER=""
+USERPW=pk
+NORT=0
+ROOTPWHASH=
+
+die()  { echo "### PK: INSTALL-FAIL: $* ###"; echo "pk-install: FAIL: $*" >&2; exit 1; }
+note() { echo "pk-install: $*"; }
+
+mk_sparse() { # <file> <MiB>  (busybox dd me conv=sparse nahi hota)
+  msf=$1; msm=$2
+  if have truncate; then
+    truncate -s "${msm}M" "$msf" 2>/dev/null && return 0
+  fi
+  dd if=/dev/zero of="$msf" bs=1 count=1 "seek=$(( msm * 1048576 - 1 ))" >/dev/null 2>&1
+}
+
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+for a in "$@"; do
+  case "$a" in
+    --target=*)      TARGET=${a#*=} ;;
+    --yes|-y)        YES=1 ;;
+    --layout=*)      LAYOUT=${a#*=} ;;
+    --size=*)        ROOTSIZE=${a#*=} ;;
+    --root-password=*) ROOTPW=${a#*=} ;;
+    --root-password-hash=*) ROOTPWHASH=${a#*=} ;;
+    --hostname=*)    HOSTN=${a#*=} ;;
+    --no-bootloader) NOBOOT=1 ;;
+    --user=*)        USER=${a#*=} ;;
+    --user-password=*) USERPW=${a#*=} ;;
+    --no-runtime-copy) NORT=1 ;;
+    --info)          INFOONLY=1 ;;
+    -h|--help)       sed -n '2,20p' "$0"; exit 0 ;;
+    *) die "unknown option: $a (--help dekho)" ;;
+  esac
+done
+
+# ---------------------------------------------------------------- live medium
+MEDIASRC=$(sed -n '1p' /run/pk/live-media 2>/dev/null)
+[ -n "$MEDIASRC" ] || MEDIASRC=$(cat /run/pk/media 2>/dev/null)
+LIVEBASE=$(dirname "${MEDIASRC:-/dev/null}")
+LIVEBASE=${LIVEBASE##*/}
+LIVEBASE=$(printf '%s' "$LIVEBASE" | sed 's/[0-9]*$//')
+ROOTIMG=/live-iso/live/pk.sqfs
+KERNELIMG=/live-iso/boot/pk-kernel
+INITRDIMG=/live-iso/boot/pk-initrd
+
+[ -f "$ROOTIMG" ] || [ -d /live-base ] || die "live base nahi mila ($ROOTIMG) - ye sirf LIVE session me chalta hai"
+
+# ---------------------------------------------------------------- disks
+list_disks() {
+  for d in /sys/block/*; do
+    dd=${d##*/}
+    case "$dd" in loop*|ram*|zram*|fd*) continue ;; esac
+    sz=$(cat "$d/size" 2>/dev/null || echo 0)
+    [ "${sz:-0}" -gt 2097152 ] || continue       # >1GB
+    rmv=$(cat "$d/removable" 2>/dev/null || echo 0)
+    case " $SKIPDISKS " in *" $dd "*) continue ;; esac
+    printf '%s %s %s\n' "$dd" "$((sz / 2097152))" "$rmv"
+  done
+}
+SKIPDISKS="$LIVEBASE"
+
+pick_target() {
+  best=""
+  for dd in $(ls /sys/block); do
+    case "$dd" in loop*|ram*|zram*) continue ;; esac
+    [ "$dd" = "$LIVEBASE" ] && continue
+    d=/sys/block/$dd
+    [ -e "$d" ] || continue
+    sz=$(cat "$d/size" 2>/dev/null || echo 0)
+    mb=$((sz / 2097152))
+    [ "$mb" -ge 4 ] || continue
+    rmv=$(cat "$d/removable" 2>/dev/null || echo 0)
+    [ "$rmv" = 1 ] && continue
+    best=$dd
+    break
+  done
+  [ -n "$best" ] || return 1
+  printf '/dev/%s' "$best"
+}
+
+if [ "$TARGET" = auto ] || [ -z "$TARGET" ] || [ "$TARGET" = ask ]; then
+  TARGET=$(pick_target) || { note "internal disk nahi mili (removable hi hai to PK_ALLOW_REMOVABLE=1 do)"; echo "### PK: INSTALL-FAIL: no-target ###"; exit 1; }
+fi
+case "$TARGET" in /dev/*) : ;; *) TARGET=/dev/$TARGET ;; esac
+[ -b "$TARGET" ] || die "target block device nahi hai: $TARGET"
+TDISK=${TARGET##*/}
+case "$TDISK" in
+  "$LIVEBASE") die "target aur boot medium same disk ($TARGET) - data gaya jaayega, isliye mana" ;;
+esac
+TMB=$(($(cat /sys/block/$TDISK/size) / 2097152))
+
+echo
+echo "=============================================================="
+echo " pk's OS install"
+echo "   target disk : $TARGET  (${TMB} GiB)"
+echo "   layout      : $LAYOUT"
+echo "   model       : $(cat /sys/block/$TDISK/device/model 2>/dev/null || echo unknown)"
+echo "   live base   : ${MEDIASRC:-?}"
+echo "=============================================================="
+lsblk -o NAME,SIZE,TYPE,MOUNTPOINT 2>/dev/null | head -15 || true
+if [ "$INFOONLY" = 1 ]; then echo "### PK: INSTALL-INFO target=$TARGET size=${TMB}GiB ###"; exit 0; fi
+if [ "$YES" != 1 ]; then
+  echo
+  echo "!! $TARGET ka saara data DELETE ho jaayega. Aage badhne ke liye  YES  type karo."
+  printf "> "
+  read ans
+  [ "$ans" = YES ] || die "cancel kiya gaya"
+fi
+
+# mount ho to umount karo
+for p in $(lsblk -nro NAME,MOUNTPOINT "$TARGET" 2>/dev/null | awk '$2 != "" {print $1}'); do
+  umount -l "$p" 2>/dev/null
+done
+
+# ---------------------------------------------------------------- partitioning
+have parted || die "parted missing in live image (build me config/live-bins.txt me daalo)"
+note "partition table bana raha hoon ($LAYOUT)"
+parted -s "$TARGET" mklabel gpt >/dev/null 2>&1 || die "mklabel fail"
+BIOSNO=0; ESPNO=0; ROOTNO=1
+case "$LAYOUT" in
+  hybrid)
+    parted -s "$TARGET" mkpart bios 1MiB 3MiB >/dev/null 2>&1 || die "mkpart bios"
+    parted -s "$TARGET" set 1 bios_grub on >/dev/null 2>&1 || die "set bios_grub"
+    parted -s "$TARGET" mkpart esp fat32 3MiB 515MiB >/dev/null 2>&1 || die "mkpart esp"
+    parted -s "$TARGET" set 2 esp on >/dev/null 2>&1
+    parted -s "$TARGET" set 2 boot on >/dev/null 2>&1
+    if [ -n "$ROOTSIZE" ]; then
+      rend=$((515 + ROOTSIZE))MiB
+    else
+      rend=100%
+    fi
+    parted -s "$TARGET" mkpart pkos ext4 515MiB "$rend" >/dev/null 2>&1 || die "mkpart root"
+    BIOSNO=1; ESPNO=2; ROOTNO=3
+    ;;
+  efi)
+    parted -s "$TARGET" mkpart esp fat32 1MiB 513MiB >/dev/null 2>&1 || die "mkpart esp"
+    parted -s "$TARGET" set 1 esp on >/dev/null 2>&1
+    if [ -n "$ROOTSIZE" ]; then rend=$((513 + ROOTSIZE))MiB; else rend=100%; fi
+    parted -s "$TARGET" mkpart pkos ext4 513MiB "$rend" >/dev/null 2>&1 || die "mkpart root"
+    ESPNO=1; ROOTNO=2
+    ;;
+  bios)
+    parted -s "$TARGET" mklabel msdos >/dev/null 2>&1 || die "mklabel msdos"
+    if [ -n "$ROOTSIZE" ]; then rend="${ROOTSIZE}MiB"; else rend=100%; fi
+    parted -s "$TARGET" mkpart primary ext4 1MiB "$rend" >/dev/null 2>&1 || die "mkpart"
+    parted -s "$TARGET" set 1 boot on >/dev/null 2>&1
+    ROOTNO=1
+    ;;
+  *) die "unknown layout: $LAYOUT" ;;
+esac
+partprobe "$TARGET" 2>/dev/null
+n=0
+while [ ! -b "${TARGET}${ROOTNO}" ] && [ $n -lt 30 ]; do sleep 0.2; n=$((n + 1)); done
+ROOTP="${TARGET}${ROOTNO}"
+[ -b "$ROOTP" ] || die "root partition node nahi bana ($ROOTP)"
+ESPP=""
+[ "$ESPNO" != 0 ] && { ESPP="${TARGET}${ESPNO}"; [ -b "$ESPP" ] || die "esp node nahi bana"; }
+note "root = $ROOTP   esp = ${ESPP:-none}"
+
+# ---------------------------------------------------------------- filesystems
+note "filesystems format kar raha hoon"
+mkfs.ext4 -q -F -L pkos "$ROOTP" 2>/dev/null || mke2fs -q -F -L pkos "$ROOTP" || die "mkfs.ext4 fail"
+[ -n "$ESPP" ] && { mkfs.vfat -F 32 -n PK-EFI "$ESPP" >/dev/null 2>&1 || die "mkfs.vfat fail"; }
+
+TGT=/mnt/install
+mkdir -p "$TGT"
+mount "$ROOTP" "$TGT" || die "root mount fail"
+[ -n "$ESPP" ] && { mkdir -p "$TGT/boot/efi"; mount "$ESPP" "$TGT/boot/efi" || die "esp mount fail"; }
+
+# ---------------------------------------------------------------- copy rootfs
+note "root filesystem copy ho raha hai (thoda time lagega)..."
+rm -f /var/log/messages /var/log/* 2>/dev/null
+SRC=/
+if [ -d /live-base ]; then
+  SRC=/live-base      # pristine squashfs (runtime ka kachra nahi jayega)
+  note "  source: squashfs (clean)"
+else
+  note "  source: running root (overlay)"
+fi
+copy_tree() { # $1=src $2=dst   (GNU tar ho to --exclude, busybox tar ho to top-level copy)
+  if tar --version 2>&1 | grep -qi "GNU tar"; then
+    ( cd "$1" && tar -cf - \
+        --exclude=./proc --exclude=./sys --exclude=./dev --exclude=./run \
+        --exclude=./tmp --exclude=./var/tmp --exclude=./mnt --exclude=./media \
+        --exclude=./live-base --exclude=./live-iso . ) |
+    ( cd "$2" && tar -xpf - )
+  else
+    # busybox tar me --exclude nahi -> / ke andar jaane wale pseudo dirs chhodo
+    mkdir -p "$2/dev" "$2/proc" "$2/sys" "$2/run" "$2/tmp" "$2/mnt" "$2/media"
+    for e in $(cd "$1" && ls -A); do
+      case "$e" in
+        proc|sys|dev|run|tmp|mnt|media|live-base|live-iso) continue ;;
+      esac
+      cp -a "$1/$e" "$2/$e" || return 1
+    done
+    mkdir -p "$2/var/tmp" "$2/var/log" "$2/root"
+    chmod 1777 "$2/tmp" "$2/var/tmp" 2>/dev/null || true
+  fi
+  return 0
+}
+copy_tree "$SRC" "$TGT" || die "copy fail"
+[ -x "$TGT/sbin/init" ] || die "copied root me /sbin/init nahi hai"
+[ -d "$TGT/lib/modules" ] || note "warning: /lib/modules nahi gaya (module support ke bina)"
+
+# kernel + initrd (init root= resolve karne ke liye chahiye)
+mkdir -p "$TGT/boot"
+cp -f "$KERNELIMG" "$TGT/boot/pk-kernel" 2>/dev/null || die "kernel copy fail ($KERNELIMG)"
+cp -f "$INITRDIMG" "$TGT/boot/pk-initrd" 2>/dev/null || die "initrd copy fail"
+KVER=$(cat "$SRC/etc/pk-kversion" 2>/dev/null)
+
+# ---------------------------------------------------------------- target config
+note "target config likh raha hoon"
+: > "$TGT/etc/fstab"
+RU=$(blkid -s UUID -o value "$ROOTP" 2>/dev/null)
+printf 'UUID=%s  /  ext4  defaults,noatime,errors=remount-ro  0 1\n' "$RU" >> "$TGT/etc/fstab"
+if [ -n "$ESPP" ]; then
+  EU=$(blkid -s UUID -o value "$ESPP" 2>/dev/null)
+  printf 'UUID=%s  /boot/efi  vfat  defaults,noauto  0 2\n' "$EU" >> "$TGT/etc/fstab"
+fi
+printf 'tmpfs  /tmp  tmpfs  defaults,size=25%%  0 0\n' >> "$TGT/etc/fstab"
+echo "$HOSTN" > "$TGT/etc/hostname"
+printf 'pkos-installed=1\ninstall-date=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$TGT/etc/pk-installed"
+rm -f "$TGT/etc/pk-live-base"
+
+# root password (pehle --root-password-hash, phare mkpasswd/openssl se bana)
+if [ -n "$ROOTPWHASH" ]; then
+  note "  --root-password-hash diya gaya (already hashed)"
+  H=$ROOTPWHASH
+elif [ -n "$ROOTPW" ] && have mkpasswd; then
+  H=$(mkpasswd -m sha-512 "$ROOTPW" 2>/dev/null)
+  if [ -n "$H" ]; then
+    if ! sed -i "1s|^root:[^:]*|root:$H|" "$TGT/etc/shadow" 2>/dev/null; then
+      awk -v h="$H" 'BEGIN{FS=OFS=":"} NR==1{$2=h} 1' "$TGT/etc/shadow" > "$TGT/etc/shadow.n" &&
+        mv -f "$TGT/etc/shadow.n" "$TGT/etc/shadow"
+    fi
+    if awk -F: 'NR==1{exit ($2 ~ /^\$[56ya]\$/ ? 0 : 1)}' "$TGT/etc/shadow" 2>/dev/null; then
+      note "  root password set kiya (sha-crypt hash verify hua)"
+    else
+      note "  WARNING: /etc/shadow ka root field update nahi hua"
+    fi
+  else
+    note "  passwd hash nahi bana (live default 'pk' rahega)"
+  fi
+fi
+chmod 600 "$TGT/etc/shadow" 2>/dev/null
+
+# ---------------------------------------------------------------- user account (--user=)
+if [ -n "$USER" ]; then
+  case "$USER" in
+    *[!a-zA-Z0-9._-]*|'') note "  user name invalid: $USER (skip)" ;;
+    *)
+    if awk -F: -v u="$USER" '$1==u{f=1} END{exit !f}' "$TGT/etc/passwd" 2>/dev/null; then
+      note "  user '$USER' pehle se passwd me hai - skip"
+    else
+      uh=1000
+      while awk -F: -v x="$uh" '$3==x{f=1} END{exit !f}' "$TGT/etc/passwd" 2>/dev/null; do uh=$((uh + 1)); done
+      if [ -n "$USERPW" ] && have mkpasswd; then
+        uhz=$(mkpasswd -m sha-512 "$USERPW" 2>/dev/null)
+        [ -n "$uhz" ] || uhz='!'
+      else
+        uhz='!'
+      fi
+      printf '%s:x:%s:%s:%s:/home/%s:/bin/sh\n' "$USER" "$uh" "$uh" "$USER" "$USER" >> "$TGT/etc/passwd"
+      printf '%s:x:%s:\n' "$USER" "$uh" >> "$TGT/etc/group"
+      lst=$(awk 'BEGIN{print int(systime()/86400)}' 2>/dev/null || echo 19000)
+      printf '%s:%s:%s:0:99999:7:::\n' "$USER" "$uhz" "$lst" >> "$TGT/etc/shadow"
+      # sudo/users groups me daal do (jo maujood hon)
+      awk -F: -v OFS=: -v u="$USER" '
+        ($1=="sudo" || $1=="users" || $1=="wheel") {
+          if ($4 == "") $4=u
+          else if ($4 !~ ("(^|,)" u "(,|$)")) $4=$4 "," u
+        }
+        { print }' "$TGT/etc/group" > "$TGT/etc/group.n" 2>/dev/null && mv -f "$TGT/etc/group.n" "$TGT/etc/group"
+      mkdir -p "$TGT/home/$USER" 2>/dev/null
+      [ -d "$TGT/etc/skel" ] && cp -a "$TGT/etc/skel/." "$TGT/home/$USER/" 2>/dev/null
+      chown -R "$uh:$uh" "$TGT/home/$USER" 2>/dev/null
+      chmod 700 "$TGT/home/$USER" 2>/dev/null
+      note "  user '$USER' bana (uid=$uh, home=/home/$USER, password $([ "$uhz" = '!' ] && echo 'set NAHI kiya (mkpasswd nahi tha)' || echo 'set kiya'))"
+    fi ;;
+  esac
+fi
+
+# ---------------------------------------------------------------- app runtime copy
+if [ "$NORT" != 1 ]; then
+  rts=$(sed -n 's/^PKRUNTIME=//p' /run/pk/boot.env 2>/dev/null | head -1)
+  [ -n "$rts" ] && [ -f "$rts" ] || rts=''
+  if [ -z "$rts" ]; then
+    for c in /live-iso/live/pk-runtime.sqfs /live/pk-runtime.sqfs /media/iso/live/pk-runtime.sqfs /opt/pk-runtime/pk-runtime.sqfs /var/lib/pk/pk-runtime.sqfs; do
+      [ -f "$c" ] && { rts=$c; break; }
+    done
+  fi
+  if [ -z "$rts" ] && have blkid; then
+    for d in $(blkid -t LABEL=PK-RUNTIME -o device 2>/dev/null); do
+      m=/mnt/pk-rt-copy
+      mkdir -p "$m" 2>/dev/null
+      if mount -o ro "$d" "$m" 2>/dev/null; then
+        for c in "$m/pk-runtime.sqfs" "$m/pkos/pk-runtime.sqfs" "$m/live/pk-runtime.sqfs"; do
+          [ -f "$c" ] && { cp -f "$c" "/tmp/pk-runtime-copy.sqfs" 2>/dev/null && rts=/tmp/pk-runtime-copy.sqfs; break; }
+        done
+        umount "$m" 2>/dev/null
+        [ -n "$rts" ] && break
+      fi
+    done
+  fi
+  if [ -n "$rts" ]; then
+    mkdir -p "$TGT/var/lib/pk" 2>/dev/null
+    if cp -f "$rts" "$TGT/var/lib/pk/pk-runtime.sqfs" 2>/dev/null; then
+      note "  app runtime installed system me copy hui ($(du -h "$TGT/var/lib/pk/pk-runtime.sqfs" | cut -f1)) -> boot par /opt/pk auto mount"
+      if [ ! -f "$TGT/var/lib/pk/pk-runtime-rw.img" ] && have mkfs.ext4; then
+        sz=$(awk '/MemAvailable/{m=int($2/1048576)} END{print (m<1024?1024:2048)}' /proc/meminfo 2>/dev/null || echo 1024)
+        if mk_sparse "$TGT/var/lib/pk/pk-runtime-rw.img" "$sz" && \
+           mkfs.ext4 -q -F -L pk-runtime-rw "$TGT/var/lib/pk/pk-runtime-rw.img" 2>/dev/null; then
+          note "  rw image bhi banayi ($sz MiB sparse) -> installed apps reboot ke baad bhi rahengi"
+        fi
+      fi
+    else
+      note "  runtime copy fail (jagah kam?) - installed system me 'pk-runtime --setup' kar lena"
+    fi
+  else
+    note "  live media par pk-runtime.sqfs nahi mila - installed system me apps layer nahi jayegi (theek hai, base OS chalega)"
+  fi
+fi
+# installed system me host keys khud banane chahiye, live wale copy na hon
+rm -rf "$TGT/etc/dropbear" 2>/dev/null
+# installed boot par network on
+sed -i 's/^PK_DHCP=.*/PK_DHCP=yes/' "$TGT/etc/default/pk" 2>/dev/null || true
+
+# ---------------------------------------------------------------- bootloader
+if [ "$NOBOOT" != 1 ]; then
+  have grub-install || die "grub-install missing in live image (build host pe grub-pc-bin/grub-efi-amd64-bin install karo)"
+  mkdir -p "$TGT/boot/grub"
+  cat > "$TGT/boot/grub/grub.cfg" <<CFG
+set timeout=3
+set default=0
+
+menuentry "pk's OS" {
+    linux /boot/pk-kernel root=UUID=$RU rw quiet loglevel=3
+    initrd /boot/pk-initrd
+}
+menuentry "pk's OS (verbose boot)" {
+    linux /boot/pk-kernel root=UUID=$RU rw loglevel=7
+    initrd /boot/pk-initrd
+}
+CFG
+  case "$LAYOUT" in
+    hybrid|bios)
+      note "GRUB (BIOS) install: grub-install --target=i386-pc $TARGET"
+      grub-install --target=i386-pc --boot-directory="$TGT/boot" --no-floppy --force \
+        "$TARGET" > /tmp/grub-pc.log 2>&1 || { tail -5 /tmp/grub-pc.log; die "grub-install i386-pc fail"; }
+      ;;
+  esac
+  case "$LAYOUT" in
+    hybrid|efi)
+      [ -n "$ESPP" ] || { note "ESP nahi hai -> UEFI boot skip"; }
+      if [ -n "$ESPP" ]; then
+        note "GRUB (UEFI) install: grub-install --target=x86_64-efi"
+        grub-install --target=x86_64-efi --efi-directory="$TGT/boot/efi" \
+          --boot-directory="$TGT/boot" --bootloader-id=PKOS --removable --no-nvram \
+          --no-floppy > /tmp/grub-efi.log 2>&1 || { tail -5 /tmp/grub-efi.log; note "UEFI install fail (BIOS boot theek rahega)"; }
+      fi
+      ;;
+  esac
+fi
+
+# ---------------------------------------------------------------- finish
+sync
+umount -R "$TGT" 2>/dev/null || { umount "$TGT/boot/efi" 2>/dev/null; umount "$TGT" 2>/dev/null; }
+cat <<FIN
+
+==============================================================
+ pk's OS $TARGET pe install ho gaya.
+   root : $ROOTP   (boot: GRUB $LAYOUT)
+   password: $ROOTPW
+ Ab reboot karo aur boot medium nikaal lo:
+   reboot -f     (ya power off karke USB hatao)
+==============================================================
+FIN
+echo "### PK: INSTALL-OK target=$TARGET root=$ROOTP ###"
+exit 0

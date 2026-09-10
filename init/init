@@ -1,0 +1,364 @@
+#!/bin/sh
+# pk's OS :: initramfs /init   (busybox ash, koi bashism nahi)
+#
+# Kaam:
+#   1) /dev /proc /sys /run mount, boot modules load (/mods)
+#   2) mode decide:
+#        installed : grub ne root=... diya -> us partition ko rw mount
+#        live      : boot medium (dd-ki hui ISO / USB) se live/pk.sqfs
+#                    ro mount + overlay (upper = RAM ya PK-PERSIST partition)
+#   3) exec run-init -c /dev/console /newroot /sbin/init
+#
+# Kernel cmdline knobs
+#   root=<dev|UUID=..|LABEL=..>       installed mode
+#   pk_media=/dev/sdb              live: sirf isi device pe dhoondo
+#   toram                             image pehle RAM me copy (fir media nikaal lo)
+#   persistent[=LABEL]                root changes persistence partition pe
+#   pk_install=<auto|/dev/vda>      boot hote hi installer
+#   pk_install_user=<name>          install ke saath non-root user bhi banao
+#   pk_install_userpw=<pw>          us user ka password (--user-password)
+#   pk_halt                        install ke baad poweroff
+#   pk_debug                       verbose init (set -x)
+#   break=mount                       initramfs shell
+#   single                            live-init ko single-user batao
+#
+# shellcheck shell=sh disable=SC3030,SC2039,SC2086
+
+PATH=/bin:/sbin
+export PATH
+DEBUG=0
+have() { command -v "$1" >/dev/null 2>&1; }
+
+say()  { printf '\n\033[1;36m[pk-init]\033[0m %s\n' "$*"; }
+dbg()  { [ "$DEBUG" = 1 ] && printf '[pk-init dbg] %s\n' "$*"; return 0; }
+bail() {
+  say "BOOT FAIL: $*"
+  echo "pk-init: FAIL: $*" >/dev/kmsg 2>/dev/null
+  echo '--- debug: ls /sys/block ; cat /proc/cmdline ; dmesg | tail -60'
+  echo '--- exit (ctrl-d) = boot continue karne ki koshish'
+  setsid cttyhack sh 2>/dev/null || sh
+}
+
+exec 0</dev/console >/dev/console 2>&1
+
+# ------------------------------------------------------------------ pseudofs + loop nodes
+for d in dev proc sys run; do [ -d "/$d" ] || mkdir -p "/$d"; done
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+[ -e /dev/console ] || { mknod /dev/console c 5 1 2>/dev/null; mknod /dev/null c 1 3 2>/dev/null; }
+mount -t proc  proc  /proc 2>/dev/null
+mount -t sysfs sysfs /sys  2>/dev/null
+mount -t tmpfs tmpfs /run  2>/dev/null
+mkdir -p /dev/pts && mount -t devpts devpts /dev/pts 2>/dev/null
+if [ ! -e /dev/loop0 ]; then
+  i=0; while [ $i -lt 8 ]; do mknod "/dev/loop$i" b 7 $i 2>/dev/null; i=$((i + 1)); done
+fi
+
+# ------------------------------------------------------------------ cmdline
+# (/proc mount hone ke BAAD parse karo, warna /proc/cmdline khali milega)
+MODE=live
+ROOTARG=""
+MEDIAHINT=""
+TORAM=0
+PERSISTREQ=0
+PERSISTLABEL=PK-PERSIST
+PERSISTLABELS=""        # khaali = default + legacy dono accept
+PERSISTDIRNAME=pk-persist
+SINGLE=0
+BREAK=""
+INSTALLDEV=""
+ROOTPW=""
+INSTUSER=""
+INSTUSERPW=""
+SSHK=0
+SILENT=0
+HALT=0
+NETCFG=
+RTCFG=
+for a in $(cat /proc/cmdline); do
+  # legacy: purane SwapeOS images/USB `swape_*` options bhej sakte hain
+  case "$a" in swape_*) a="pk_${a#swape_}" ;; esac
+  case "$a" in
+    pk_debug|debug)  DEBUG=1 ;;
+    toram)              TORAM=1 ;;
+    persistent)         PERSISTREQ=1 ;;
+    persistent=*)       PERSISTREQ=1; PERSISTLABEL=${a#*=}; PERSISTLABELS=" ${a#*=} " ;;
+    root=*)             ROOTARG=${a#*=} ;;
+    pk_root=*)       ROOTARG=${a#*=} ;;
+    pk_media=*)      MEDIAHINT=${a#*=} ;;
+    pk_install=*)    INSTALLDEV=${a#*=} ;;
+    pk_rootpw=*)     ROOTPW=${a#*=} ;;
+    pk_install_user=*)  INSTUSER=${a#*=} ;;
+    pk_install_userpw=*) INSTUSERPW=${a#*=} ;;
+    pk_ssh=on)       SSHK=1 ;;
+    pk_ssh=off)      SSHK=2 ;;
+    pk_silent)       SILENT=1 ;;
+    pk_halt)         HALT=1 ;;
+    pk_net=*)        NETCFG=${a#*=} ;;
+    pk_runtime=off)  RTCFG=off ;;
+    pk_runtime=*)    RTCFG=${a#*=} ;;
+    single|S)           SINGLE=1 ;;
+    break=*)            BREAK=${a#*=} ;;
+  esac
+done
+if [ "$DEBUG" = 1 ]; then
+  set -x
+else
+  dmesg -n 1 2>/dev/null || true   # "Can't open blockdev" jaisa probe noise chhupao
+fi
+
+# ------------------------------------------------------------------ modules
+# /mods = build ke waqt dependency-order me copy + decompress kiye gaye .ko
+if [ -d /mods ]; then
+  for m in /mods/*; do
+    [ -e "$m" ] || continue
+    insmod "$m" 2>/dev/null || dbg "insmod $(basename "$m") -> already builtin?"
+  done
+fi
+
+# ------------------------------------------------------------------ helpers
+list_devices() { # disks + unke partitions, /dev/..
+  for d in /sys/block/*; do
+    [ -d "$d" ] || continue
+    disk=${d##*/}
+    case "$disk" in zram*|ram*|loop*) continue ;; esac
+    [ -b "/dev/$disk" ] && printf '/dev/%s\n' "$disk"
+    for p in "$d"/"$disk"*; do
+      [ -d "$p" ] || continue
+      pb=${p##*/}
+      case "$pb" in *[0-9]) [ -b "/dev/$pb" ] && printf '/dev/%s\n' "$pb" ;; esac
+    done
+  done
+}
+
+mounted() { # <path> -> 0 agar mount hai
+  grep -q " $1 " /proc/mounts 2>/dev/null
+}
+
+resolve_dev() { # <dev|UUID=x|LABEL=x|PARTUUID=x> -> /dev/..
+  r=$1
+  case "$r" in
+    /dev/*)
+      [ -b "$r" ] && { printf '%s' "$r"; return 0; }
+      [ -e "$r" ] && { printf '%s' "$(readlink -f "$r")"; return 0; }
+      return 1 ;;
+    UUID=*|LABEL=*|PARTUUID=*) : ;;
+    *) return 1 ;;
+  esac
+  tag=${r%%=*}; want=${r#*=}
+  have blkid || return 1
+  for d in $(list_devices); do
+    v=$(blkid -s "$tag" -o value "$d" 2>/dev/null) || continue
+    [ "$v" = "$want" ] && { printf '%s' "$d"; return 0; }
+  done
+  return 1
+}
+
+# ------------------------------------------------------------------ installed mode?
+if [ -n "$ROOTARG" ]; then
+  tries=0
+  while [ $tries -lt 25 ]; do
+    dev=$(resolve_dev "$ROOTARG") && break
+    sleep 0.2
+    tries=$((tries + 1))
+  done
+  if [ -n "${dev:-}" ] && [ -b "$dev" ]; then
+    mkdir -p /newroot
+    if mount -o rw "$dev" /newroot 2>/dev/null || mount "$dev" /newroot 2>/dev/null; then
+      if [ -x /newroot/sbin/init ]; then
+        MODE=installed
+        ROOTDEV=$dev
+        say "installed mode: root=$ROOTDEV"
+      else
+        umount /newroot 2>/dev/null
+        say "root=$dev par /sbin/init nahi mila -> live boot try karta hoon"
+      fi
+    fi
+  else
+    say "root=$ROOTARG resolve nahi hua -> live boot try"
+  fi
+fi
+
+# ------------------------------------------------------------------ live base
+find_live_image() { # -> "<dev> <path-in-fs> <fstype>"
+  mkdir -p /mnt/media
+  if [ -n "$MEDIAHINT" ]; then
+    cands=$(resolve_dev "$MEDIAHINT" 2>/dev/null)
+    [ -n "${cands:-}" ] || cands=$MEDIAHINT
+  else
+    cands=$(list_devices)
+  fi
+  for dev in $cands; do
+    [ -b "$dev" ] || continue
+    for t in iso9660 udf vfat exfat ext4 xfs ntfs3; do
+      mounted /mnt/media && umount /mnt/media 2>/dev/null
+      mount -o ro -t $t "$dev" /mnt/media 2>/dev/null || continue
+      for p in /live/pk.sqfs /live/swape.sqfs /PK/SQFS /SWAPE/SQFS; do
+        if [ -f "/mnt/media$p" ]; then
+          # /mnt/media MOUNTED rehne do - caller reuse karta hai
+          printf '%s %s %s\n' "$dev" "$p" "$t"
+          return 0
+        fi
+      done
+    done
+    mounted /mnt/media && umount /mnt/media 2>/dev/null
+  done
+  return 1
+}
+
+mount_live_base() {
+  mkdir -p /ro /mnt/media
+  found=$(find_live_image) || return 1
+  set -- $found
+  MEDIA=$1; IMG=$2; MEDIATYPE=${3:-auto}
+  say "live base: $IMG from $MEDIA (fs=$MEDIATYPE)"
+  # scan ke waqt wahi mount already laga hai to use karo, warna lagao
+  if ! mounted /mnt/media; then
+    mount -o ro -t "$MEDIATYPE" "$MEDIA" /mnt/media 2>/dev/null ||
+      mount -o ro "$MEDIA" /mnt/media 2>/dev/null || return 1
+  fi
+  SRC=/mnt/media$IMG
+
+  if [ "$TORAM" = 1 ]; then
+    kb=$(( $(wc -c < "$SRC") / 1024 + 65536 ))
+    say "toram: $((kb / 1024)) MB RAM me copy..."
+    mkdir -p /run/toram
+    mount -o remount,size=${kb}k tmpfs /run 2>/dev/null
+    if cp "$SRC" /run/toram/pk.sqfs 2>/dev/null; then
+      SRC=/run/toram/pk.sqfs
+      umount /mnt/media 2>/dev/null
+      say "toram done - ab boot media nikaal sakte ho"
+    else
+      say "toram copy fail -> media se hi mount"
+    fi
+  fi
+
+  if mount -o ro -t squashfs "$SRC" /ro 2>/dev/null; then
+    return 0
+  fi
+  dbg "direct squashfs mount fail -> losetup wala raasta"
+  loop=$(losetup -f 2>/dev/null)
+  [ -n "$loop" ] || { mknod /dev/loop8 b 7 8 2>/dev/null; loop=/dev/loop8; }
+  losetup -r "$loop" "$SRC" 2>/dev/null || losetup "$loop" "$SRC" 2>/dev/null || return 1
+  LOOPDEV=$loop
+  mount -o ro -t squashfs "$loop" /ro 2>/dev/null || mount -o ro "$loop" /ro 2>/dev/null
+}
+
+persist_upper() { # -> "<upperdir> <workdir>"  (agar persistence partition mili)
+  mkdir -p /mnt/persist
+  for dev in $(list_devices); do
+    [ "$dev" = "${MEDIA:-}" ] && continue
+    mounted /mnt/persist && umount /mnt/persist 2>/dev/null
+    mount -o rw "$dev" /mnt/persist 2>/dev/null || continue
+    lbl=$(blkid -s LABEL -o value "$dev" 2>/dev/null)
+    if [ -n "$lbl" ]; then
+      # explicit persistent=<label> diya to wahi chahiye; warna naya + legacy label
+      accept=" $PERSISTLABEL "
+      [ -z "$PERSISTLABELS" ] && accept=" $PERSISTLABEL SWAPE-PERSIST "
+      case "$accept" in *" $lbl "*) : ;; *) umount /mnt/persist 2>/dev/null; continue ;; esac
+    fi
+    d=/mnt/persist/pk-persist
+    [ -d /mnt/persist/swape-persist ] && d=/mnt/persist/swape-persist   # legacy USB
+    [ -d "$d" ] || mkdir -p "$d" 2>/dev/null || {
+      umount /mnt/persist 2>/dev/null; continue; }
+    mkdir -p "$d/upper" "$d/work" 2>/dev/null || {
+      umount /mnt/persist 2>/dev/null; continue; }
+    # NOTE: caller command-substitution me hai -> variables wapas nahi aa sakte,
+    # isliye dev ko bhi print karke bhejte hain (upper work dev)
+    printf '%s %s %s\n' "$d/upper" "$d/work" "$dev"
+    return 0
+  done
+  umount /mnt/persist 2>/dev/null
+  return 1
+}
+
+make_rw_root() {
+  mkdir -p /newroot
+  if [ "$PERSISTREQ" = 1 ]; then
+    pu=$(persist_upper) || pu=""
+    if [ -n "$pu" ]; then
+      set -- $pu
+      PERSISTDEV=${3:-unknown}
+      if mount -t overlay overlay -o lowerdir=/ro,upperdir=$1,workdir=$2 /newroot 2>/dev/null; then
+        printf '%s\n' "$PERSISTDEV" > /run/pk-persist-dev 2>/dev/null
+        say "root = squashfs + persistence ($PERSISTDEV) - changes disk pe rahenge"
+        return 0
+      fi
+      say "overlay(persistence) fail -> RAM overlay"
+    else
+      say "persistence partition nahi mili (ext4, label=$PERSISTLABEL) -> changes sirf RAM me"
+    fi
+  fi
+  mount -t tmpfs -o size=75% tmpfs /tmp.rw 2>/dev/null || { mkdir -p /tmp.rw; }
+  mkdir -p /tmp.rw/upper /tmp.rw/work
+  if mount -t overlay overlay -o lowerdir=/ro,upperdir=/tmp.rw/upper,workdir=/tmp.rw/work /newroot 2>/dev/null; then
+    say "root = squashfs (ro) + RAM overlay - reboot pe sab reset"
+    return 0
+  fi
+  say "overlayfs nahi -> pura root RAM me copy kar raha hoon"
+  umount /tmp.rw 2>/dev/null
+  mount -t tmpfs -o size=75% tmpfs /newroot || return 1
+  ( cd /ro && tar -cf - . ) | ( cd /newroot && tar -xf - ) || return 1
+  return 0
+}
+
+if [ "$MODE" = live ]; then
+  mount_live_base || bail "live image (live/pk.sqfs) kisi medium pe nahi mila.
+      QEMU  : -cdrom build/pkos.iso
+      real  : ISO ko USB pe dd karo (tools/write-usb.sh)
+      check : ls /sys/block ; dmesg | tail -40"
+  make_rw_root    || bail "writable root nahi ban paya (overlayfs bhi nahi, tmpfs copy bhi nahi)"
+fi
+[ -x /newroot/sbin/init ] || bail "/newroot/sbin/init missing - root image kharab lagta hai"
+[ "$BREAK" = mount ] && bail "break=mount - ctrl-d se boot continue"
+
+# ------------------------------------------------------------------ runtime mounts
+for m in dev proc sys run; do
+  mkdir -p "/newroot/$m"
+  mount --move "/$m" "/newroot/$m" 2>/dev/null || true
+done
+mount --move /dev/pts /newroot/dev/pts 2>/dev/null || true
+mkdir -p /newroot/dev/shm /newroot/tmp /newroot/sys /newroot/proc
+[ -e /newroot/dev/console ] || mknod /newroot/dev/console c 5 1 2>/dev/null
+mount -t tmpfs -o mode=1777 tmpfs /newroot/dev/shm 2>/dev/null || true
+
+# live base + medium live system ke andar bhi dikhe (installer ko chahiye)
+if [ "$MODE" = live ]; then
+  mkdir -p /newroot/live-base /newroot/live-iso
+  mount --move /ro /newroot/live-base 2>/dev/null || mount -o bind /ro /newroot/live-base 2>/dev/null
+  mount --move /mnt/media /newroot/live-iso 2>/dev/null || mount -o bind /mnt/media /newroot/live-iso 2>/dev/null
+  if [ -n "${PERSISTDEV:-}" ]; then
+    mkdir -p /newroot/persistence
+    mount --move /mnt/persist /newroot/persistence 2>/dev/null || \
+      mount -o bind /mnt/persist /newroot/persistence 2>/dev/null || true
+    : > /newroot/run/pk-persist-on
+    printf '%s\n' "$PERSISTDEV" > /newroot/run/pk/persist-dev 2>/dev/null
+  fi
+fi
+
+# ------------------------------------------------------------------ handoff
+mkdir -p /newroot/run/pk
+cat /proc/cmdline > /newroot/run/pk/cmdline 2>/dev/null
+printf '%s\n' "$MODE" > /newroot/run/pk/mode
+dmesg > /newroot/run/pk/dmesg-boot.log 2>/dev/null
+[ "$SINGLE" = 1 ] && : > /newroot/run/pk/single
+[ "$TORAM" = 1 ] && : > /newroot/run/pk/toram
+[ -n "${MEDIA:-}" ] && printf '%s\n' "$MEDIA" > /newroot/run/pk/media
+[ -n "${ROOTDEV:-}" ] && printf '%s\n' "$ROOTDEV" > /newroot/run/pk/rootdev
+{
+  [ -n "$INSTALLDEV" ] && printf 'INSTALLDEV=%s\n' "$INSTALLDEV"
+  [ -n "$ROOTPW" ] && printf 'ROOTPW=%s\n' "$ROOTPW"
+  [ -n "$INSTUSER" ] && printf 'INSTUSER=%s\n' "$INSTUSER"
+  [ -n "$INSTUSERPW" ] && printf 'INSTUSERPW=%s\n' "$INSTUSERPW"
+  [ "${SSHK:-0}" = 1 ] && echo PK_SSH=yes
+  [ "${SSHK:-0}" = 2 ] && echo PK_SSH=no
+  [ "$SILENT" = 1 ] && echo SILENT=1
+  [ "$HALT" = 1 ] && echo HALT=1
+  [ -n "$NETCFG" ] && printf 'NETCFG=%s\n' "$NETCFG"
+  [ "${RTCFG:-}" = off ] && echo PK_RUNTIME=off
+  case "${RTCFG:-}" in ''|off) : ;; *) printf 'PKRUNTIME=%s\n' "$RTCFG" ;; esac
+} > /newroot/run/pk/boot.env
+
+say "handoff -> /sbin/init ($MODE mode)"
+exec run-init -c /dev/console /newroot /sbin/init
+bail "run-init return ho gaya (!)"
+exec sh

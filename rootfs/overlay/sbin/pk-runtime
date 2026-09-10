@@ -1,0 +1,250 @@
+#!/bin/sh
+# pk's OS :: app runtime attach   usage: pk-runtime [start|stop|status|find|--setup <file>]
+#
+# Runtime = ek squashfs Debian userland (build/pk-runtime.sqfs, `scripts/make-runtime`
+# se banta hai). Boot par ye /opt/pk par mount hota hai (overlayfs upper ke saath),
+# taaki koi bhi Linux app chale, apt se packages aa jaayein, aur Wine se Windows apps.
+#
+# dhundhne ka order:
+#   pk_runtime=<boot option>  ->  label PK-RUNTIME partition  ->  live media par
+#   /live/pk-runtime.sqfs  ->  /opt/pk-runtime/pk-runtime.sqfs  ->  disks ke root par file
+set -u
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+RT=/opt/pk                 # mount point
+RO=/run/pk/runtime/ro
+UP=/run/pk/runtime/upper
+INFO=/run/pk/runtime.env
+LABEL=PK-RUNTIME
+FILE=pk-runtime.sqfs
+RWWANT=pk-runtime-rw.img
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+mk_sparse() { # <file> <MiB>  (busybox dd me conv=sparse nahi hota)
+  msf=$1; msm=$2
+  if have truncate; then
+    truncate -s "${msm}M" "$msf" 2>/dev/null && return 0
+  fi
+  dd if=/dev/zero of="$msf" bs=1 count=1 "seek=$(( msm * 1048576 - 1 ))" >/dev/null 2>&1
+}
+
+
+say()  { printf 'pk-runtime: %s\n' "$*"; }
+mark() { printf '### PK: %s ###\n' "$*" > /dev/console 2>/dev/null; printf '%s\n' "$*" > /dev/kmsg 2>/dev/null; }
+mounted() { grep -q " $1 " /proc/mounts 2>/dev/null; }
+
+. /etc/default/pk 2>/dev/null || true
+[ -r /run/pk/boot.env ] && . /run/pk/boot.env
+WANT=${PK_RUNTIME:-auto}
+HINT=${PKRUNTIME:-}
+
+find_sqfs() { # -> "<file-on-mounted-fs-or-plain-path>" (mount karni pade to /mnt/pk-rt pe)
+  # 1) explicit hint from cmdline
+  if [ -n "$HINT" ]; then
+    case "$HINT" in
+      *:*) dev=${HINT%%:*}; p=${HINT#*:} ;;
+      /*.sqfs) printf '%s\n' "$HINT"; return 0 ;;
+      /dev/*) dev=$HINT; p=/$FILE ;;
+      *) dev=/dev/$HINT; p=/$FILE ;;
+    esac
+    [ -n "${dev:-}" ] || { printf '\n'; return 1; }
+    mkdir -p /mnt/pk-rt
+    mounted /mnt/pk-rt && umount /mnt/pk-rt 2>/dev/null
+    if mount "$dev" /mnt/pk-rt 2>/dev/null || mount -o ro "$dev" /mnt/pk-rt 2>/dev/null; then
+      for c in "$p" /live/$FILE /pkos/$FILE; do
+        [ -f "/mnt/pk-rt$c" ] && { printf '%s\n' "/mnt/pk-rt$c"; return 0; }
+      done
+      umount /mnt/pk-rt 2>/dev/null
+    fi
+    printf '\n'; return 1
+  fi
+  # 2) live media (ISO ke andar burn kiya hua case)
+  for base in /live-iso /live /media/iso; do
+    for c in /live/$FILE /pkos/$FILE /$FILE; do
+      [ -f "$base$c" ] && { printf '%s\n' "$base$c"; return 0; }
+    done
+  done
+  # 3) installed system me local copy
+  for c in /opt/pk-runtime/$FILE /var/lib/pk/$FILE; do
+    [ -f "$c" ] && { printf '%s\n' "$c"; return 0; }
+  done
+  # 4) label PK-RUNTIME wala partition
+  if have blkid; then
+    for d in $(blkid -t LABEL=$LABEL -o device 2>/dev/null); do
+      mkdir -p /mnt/pk-rt
+      mounted /mnt/pk-rt && umount /mnt/pk-rt 2>/dev/null
+      mount "$d" /mnt/pk-rt 2>/dev/null || mount -o ro "$d" /mnt/pk-rt 2>/dev/null || continue
+      for c in /$FILE /pkos/$FILE /live/$FILE; do
+        [ -f "/mnt/pk-rt$c" ] && { printf '%s\n' "/mnt/pk-rt$c"; return 0; }
+      done
+      umount /mnt/pk-rt 2>/dev/null
+    done
+  fi
+  # 5) har block dev ke root par ek nazar (partition table wale hi, raw disk skip)
+  for d in /sys/block/*/*; do
+    [ -b "/dev/${d##*/}" ] || continue
+    case "${d##*/}" in loop*|ram*|zram*) continue ;; esac
+    mkdir -p /mnt/pk-rt
+    mounted /mnt/pk-rt && umount /mnt/pk-rt 2>/dev/null
+    mount "/dev/${d##*/}" /mnt/pk-rt 2>/dev/null || mount -o ro "/dev/${d##*/}" /mnt/pk-rt 2>/dev/null || continue
+    if [ -f "/mnt/pk-rt/$FILE" ]; then printf '%s\n' "/mnt/pk-rt/$FILE"; return 0; fi
+    umount /mnt/pk-rt 2>/dev/null
+  done
+  printf '\n'
+  return 1
+}
+
+attach() {
+  [ "$WANT" = off ] && { mark "RUNTIME-SKIP (pk_runtime=off)"; return 0; }
+  mounted "$RT" && { say "pehle se attached: $RT"; return 0; }
+  src=$(find_sqfs) || true
+  if [ -z "${src:-}" ]; then
+    mark "RUNTIME-NONE (koi $FILE nahi mila - 'make runtime' se banao ya --setup use karo)"
+    return 1
+  fi
+  say "runtime image: $src"
+  mkdir -p "$RO" "$RT" /run/pk
+mkdir -p "$UP/upper" "$UP/work"
+  losetup -r /dev/loop7 "$src" 2>/dev/null || losetup /dev/loop7 "$src" 2>/dev/null
+  loop=$(losetup -f "$src" 2>/dev/null); [ -n "${loop:-}" ] || loop=/dev/loop7
+  if ! mount -o ro -t squashfs "$loop" "$RO" 2>/dev/null; then
+    mount -o ro "$loop" "$RO" 2>/dev/null || { mark "RUNTIME-FAIL (squashfs mount: $src)"; return 1; }
+  fi
+  # rw overlay: sqfs ke bagal me img, persistence partition par, ya /var/lib/pk me bana lo
+  rwimg=""
+  for c in "$(dirname "$src")/$RWWANT" /mnt/persist/$RWWANT /persistence/$RWWANT /var/lib/pk/$RWWANT; do
+    [ -f "$c" ] && [ -w "$c" ] && { rwimg=$c; break; }
+  done
+  # live (persistence OFF) me / ka upperdir tmpfs hota hai -> wahan badi img banana
+  # matlab hai poori image RAM me; isliye sirf real-disk jagah par banate hain.
+  live_ram=0
+  case "$(awk '$2=="/"' /proc/mounts 2>/dev/null)" in
+    *upperdir=/mnt/persist*|*upperdir=/persistence*) : ;;
+    *overlay*) live_ram=1 ;;
+  esac
+  if [ -z "$rwimg" ]; then
+    for w in /mnt/persist /persistence /var/lib/pk; do
+      [ "$w" = /var/lib/pk ] && [ "$live_ram" = 1 ] && continue
+      [ -d "$w" ] && [ -w "$w" ] && { rwimg=$w/$RWWANT; break; }
+    done
+    if [ "$live_ram" = 1 ]; then
+      say "live mode (persistence off): rw image RAM me nahi banayenge -> apps ephemeral"
+      say "  bachane ke liye: 'persistent' boot option, PK-RUNTIME partition, ya permanent install"
+    fi
+    if [ -n "$rwimg" ]; then
+      say "rw image banata hoon: $rwimg"
+      mkdir -p "$(dirname "$rwimg")"
+      sz=$(awk '/MemAvailable/{s=int($2/1048576)} END{print (s<512?512:2048)}' /proc/meminfo 2>/dev/null || echo 1024)
+      mk_sparse "$rwimg.tmp" "$sz" || { rm -f "$rwimg.tmp"; rwimg=""; }
+      [ -f "$rwimg.tmp" ] && { mkfs.ext4 -q -F -L pk-runtime-rw "$rwimg.tmp" 2>/dev/null && mv -f "$rwimg.tmp" "$rwimg" || rm -f "$rwimg.tmp"; }
+    fi
+  fi
+  mode="tmpfs (ephemeral)"
+  if [ -n "$rwimg" ]; then
+    mkdir -p /mnt/pk-rw
+    if mount -o loop "$rwimg" /mnt/pk-rw 2>/dev/null; then
+      # sach me writable hai? (loop ka backing file ro fs par ho to mount 'chal'
+      # jaata hai par par webaar read-only reh jaata hai)
+      if touch /mnt/pk-rw/.rwtest 2>/dev/null; then
+        rm -f /mnt/pk-rw/.rwtest
+        mkdir -p /mnt/pk-rw/pk-runtime/upper /mnt/pk-rw/pk-runtime/work
+        UP=/mnt/pk-rw/pk-runtime
+        mode="rw-image ($rwimg)"
+      else
+        mark "RUNTIME-WARN rw image read-only lagi ($rwimg) -> RAM upper (install reboot tak hi rahenge)"
+      fi
+    else
+      say "rw image mount fail -> RAM upper"
+    fi
+  fi
+  oerr=$(mount -t overlay overlay-pk -o "lowerdir=$RO,upperdir=$UP/upper,workdir=$UP/work" "$RT" 2>&1)
+  if [ -z "$oerr" ]; then
+    :
+  elif mount --bind "$RO" "$RT" 2>/dev/null; then
+    mark "RUNTIME-WARN overlay mount fail ($oerr) -> read-only bind (apps chalengi, install nahi hoga)"
+    mode="read-only bind"
+  else
+    mark "RUNTIME-FAIL (overlay mount: $RT)"
+    return 1
+  fi
+  cat > "$INFO" <<EOF
+PK_RUNTIME_ROOT=$RT
+PK_RUNTIME_SRC=$src
+PK_RUNTIME_UPPER=$UP
+PK_RUNTIME_MODE=$mode
+EOF
+  cat > /etc/profile.d/pk-runtime.sh 2>/dev/null <<'EOF' || true
+# pk's OS runtime: /opt/pk ke bin PATH me, libs LD_LIBRARY_PATH me
+if [ -d /opt/pk/usr/bin ]; then
+  PATH="$PATH:/opt/pk/usr/local/bin:/opt/pk/usr/bin:/opt/pk/usr/local/sbin:/opt/pk/usr/sbin"
+  export PATH
+  LD_LIBRARY_PATH="/opt/pk/usr/lib/x86_64-linux-gnu:/opt/pk/usr/lib:${LD_LIBRARY_PATH:-}"
+  export LD_LIBRARY_PATH
+fi
+EOF
+  mark "RUNTIME-OK src=$(basename "$src") upper=$UP mode=$mode"
+  say "attached -> $RT  ($mode)"
+  return 0
+}
+
+detach() {
+  mounted "$RT" && umount -R "$RT" 2>/dev/null || umount "$RT" 2>/dev/null || true
+  umount /mnt/pk-rw 2>/dev/null || true
+  umount "$RO" 2>/dev/null || true
+  umount /mnt/pk-rt 2>/dev/null || true
+  losetup -d /dev/loop7 2>/dev/null || true
+  say "detached"
+}
+
+status() {
+  if mounted "$RT"; then
+    echo "runtime: ATTACHED at $RT"
+    [ -r "$INFO" ] && sed 's/^/  /' "$INFO"
+    echo "  pkgs: $(ls "$RT"/var/lib/dpkg/info 2>/dev/null | grep -c '\.list$')"
+    echo "  wine: $(ls "$RT"/usr/bin/wine 2>/dev/null && echo yes || echo no)"
+  else
+    echo "runtime: nahi laga hai (boot log me 'RUNTIME-NONE' dekho ya 'pk-runtime start' chalao)"
+  fi
+}
+
+# --setup <sqfs> [<dev>] : live USB ke free space me PK-RUNTIME partition banao + copy
+setup() {
+  img=${1:-}; shift || true
+  dev=${1:-$(sed -n '1p' /run/pk/live-media 2>/dev/null)}
+  [ -n "$img" ] && [ -f "$img" ] || { echo "usage: pk-runtime --setup <pk-runtime.sqfs> [/dev/sdX]"; exit 1; }
+  [ -n "$dev" ] || { echo "device do (jaise /dev/sdb)"; exit 1; }
+  case "$dev" in /dev/*) : ;; *) dev=/dev/$dev ;; esac
+  [ -b "$dev" ] || { echo "no such device: $dev"; exit 1; }
+  have parted || { echo "parted chahiye"; exit 1; }
+  LAST=$(parted -s -m "$dev" unit MiB print 2>/dev/null | awk -F: '/^[0-9]+:/ { if ($3+0>e) e=$3+0 } END { print e+0 }')
+  TOTAL=$(( $(cat "/sys/block/${dev#/dev/}/size" 2>/dev/null || echo 0) / 2048 ))
+  NEED=$(( $(stat -c %s "$img") / 1048576 + 64 ))
+  FREE=$(( TOTAL - LAST ))
+  echo "device=$dev used=${LAST}MiB total=${TOTAL}MiB free=${FREE}MiB chahiye=${NEED}MiB"
+  [ "$FREE" -gt "$NEED" ] || { echo "free space kam hai - ISO chhoti karo ya runtime alag disk pe rakho"; exit 1; }
+  parted -s "$dev" mkpart runtime ext4 "${LAST}MiB" 100% || { echo "mkpart fail"; exit 1; }
+  partprobe "$dev" 2>/dev/null; sleep 1
+  d=${dev#/dev/}
+  pn=$(ls -1 "/sys/block/$d/" 2>/dev/null | grep -E "^${d}[0-9]+$" | tail -1)
+  [ -n "$pn" ] || { echo "partition node nahi bana; reboot ke baad dobara try karo"; exit 1; }
+  mkfs.ext4 -q -F -L $LABEL "/dev/$pn" || { echo "mkfs fail"; exit 1; }
+  mkdir -p /mnt/pk-rt-set
+  mount "/dev/$pn" /mnt/pk-rt-set || { echo "mount fail"; exit 1; }
+  cp "$img" "/mnt/pk-rt-set/$FILE" && sync
+  rw=${img%.sqfs}-rw.img
+  [ -f "$rw" ] && { cp "$rw" "/mnt/pk-rt-set/$RWWANT" && sync; }
+  umount /mnt/pk-rt-set
+  echo "OK - reboot karo; runtime apne aap /opt/pk par aa jaayega."
+  echo "     (ab 'pk-runtime start' se bhi laga sakte ho)"
+  attach
+}
+
+case "${1:-start}" in
+  start)  attach ;;
+  stop)   detach ;;
+  status) status ;;
+  find)   find_sqfs && : ;;
+  --setup) shift; setup "$@" ;;
+  *) echo "usage: pk-runtime [start|stop|status|find|--setup <pk-runtime.sqfs> [<dev>]]"; exit 1 ;;
+esac
+exit $?

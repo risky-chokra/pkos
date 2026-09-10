@@ -1,0 +1,5 @@
+# pk's OS defaults (pk-boot ise boot hone se pehle padhta hai)
+# note: ${VAR:-default} pattern -> kernel cmdline/boot.env se aaya value jeetta hai
+PK_DHCP=${PK_DHCP:-no}    # yes = boot pe DHCP se IP lena
+PK_SSH=${PK_SSH:-no}     # yes = dropbear SSH server start
+PK_ISSUE=${PK_ISSUE:-yes}

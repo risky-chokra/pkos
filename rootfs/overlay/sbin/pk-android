@@ -1,0 +1,136 @@
+#!/bin/sh
+# pk's OS :: Android (.apk) ka raasta - kya chahiye, kya hai, kaise laayein
+#   pk-android doctor            binder/ashmem/kvm/waydroid ka haal
+#   pk-android enable            /dev/binderfs mount karne ki try (kernel support ho to)
+#   pk-android install <apk>     apk extract + waydroid/greenlight/setup instructions
+#   pk-android kernel-frag       apne kernel ke liye config fragment (make kernel)
+#   pk-android list              runtime me installed android containers
+#
+# Sach: Android app = Linux kernel par Android HAL (binderfs/ion/ashmem) + ART runtime.
+# Isliye .apk chalane ke liye 2 cheezein chahiye: (1) kernel me CONFIG_ANDROID_BINDERFS=y
+# (hamare shipped host-kernel me nahi hai), (2) waydroid/GSI image. Ye script wahi
+# steps deta hai aur jo possible hai wahi karke batata hai.
+set -u
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+RT=${PK_RUNTIME_ROOT:-/opt/pk}
+APPS=${PK_APPS_DIR:-/opt/pk/apps}
+have() { command -v "$1" >/dev/null 2>&1; }
+say()  { printf 'pk-android: %s\n' "$*"; }
+warn() { printf 'pk-android: %s\n' "$*" >&2; }
+mark() { ( printf '### PK: %s ###\n' "$*" > /dev/console ) 2>/dev/null; ( printf '%s\n' "$*" > /dev/kmsg ) 2>/dev/null; }
+runtime_ok() { grep -q " $RT " /proc/mounts 2>/dev/null && [ -d "$RT/usr" ]; }
+
+has_binder() {
+  [ -e /dev/binder ] || [ -e /dev/binderfs ] || grep -q binderfs /proc/filesystems 2>/dev/null
+}
+has_ashmem() {
+  [ -e /dev/ashmem ] || grep -q ashmem /proc/kallsyms 2>/dev/null || grep -q 'CONFIG_ASHMEM=y' /boot/config-$(uname -r) 2>/dev/null
+}
+
+doctor() {
+  printf 'pk-android doctor (kernel %s)\n' "$(uname -r)"
+  if has_binder; then printf '  binder/binderfs : HAAN\n'; else printf '  binder/binderfs : NAHI  <- blocker #1 (kernel rebuild chahiye)\n'; fi
+  if has_ashmem; then printf '  ashmem          : HAAN\n'; else printf '  ashmem          : nahi (memfd use ho sakta hai, waydroid config me)\n'; fi
+  if [ -e /dev/kvm ]; then printf '  /dev/kvm        : haan (emulator/guest tez)\n'; else printf '  /dev/kvm        : nahi\n'; fi
+  if runtime_ok; then printf '  runtime         : attached\n'; else printf '  runtime         : nahi laga (pk-runtime start)\n'; fi
+  if runtime_ok && { [ -x "$RT/usr/bin/waydroid" ] || [ -e "$RT/usr/bin/waydroid" ]; }; then
+    printf '  waydroid        : installed (runtime me)\n'
+  else
+    printf '  waydroid        : nahi  ->  pk-get install -y waydroid lxc\n'
+  fi
+  BR=no; WD=no
+  has_binder && BR=yes
+  { [ -x "$RT/usr/bin/waydroid" ] || [ -e "$RT/usr/bin/waydroid" ]; } && WD=yes
+  if [ "$BR" = yes ] && [ "$WD" = yes ]; then
+    mark "ANDROID-READY"; printf '\n  ready:  pk-android init   phir  pk-run --install <apk>\n'
+  else
+    mark "ANDROID-BLOCKED (binderfs=${BR:-no} waydroid=${WD:-no})"
+    printf '\n  abhi .apk native nahi chalegi. Do option:\n'
+    printf '    A) apna kernel:  make kernel   (pk-android kernel-frag dekho)  -> phir ye test\n'
+    printf '    B) Android-x86 / Waydroid guest:  pk-vm new droid --size=20G (QEMU, dheema par chalega)\n'
+  fi
+  return 0
+}
+
+do_enable() {
+  mkdir -p /dev/binderfs 2>/dev/null
+  if grep -q binderfs /proc/filesystems 2>/dev/null; then
+    if mount -t binder binder /dev/binderfs 2>/dev/null; then
+      say "/dev/binderfs mount ho gaya ✓"; mark "ANDROID-BINDERFS-OK"; return 0
+    fi
+    say "mount fail (perms?)"; mark "ANDROID-BINDERFS-FAIL"; return 1
+  fi
+  warn "kernel me binderfs support nahi (CONFIG_ANDROID_BINDERFS=y chahiye)"
+  warn "filhaal /dev/binder bhi nahi -> Android apps is kernel par nahi chalengi"
+  mark "ANDROID-BINDERFS-NOSUPPORT"
+  return 1
+}
+
+do_install() {
+  apk=${1:-}
+  [ -n "$apk" ] && [ -f "$apk" ] || { echo "usage: pk-android install <app.apk>"; return 1; }
+  d=$APPS/apk
+  mkdir -p "$d" 2>/dev/null || { warn "$APPS writable nahi (runtime lagao)"; return 71; }
+  if have unzip; then
+    unzip -q -o "$apk" -d "$d/$(basename "$apk" .apk)" >/dev/null 2>&1 || warn "unzip fail"
+  else
+    warn "unzip nahi (base image me) - sirf record kar rahe hain"
+  fi
+  name=$(basename "$apk" .apk)
+  say "apk extract: $d/$name  (AndroidManifest binary XML hai; isliye package/activity khud nahi padh sakte)"
+  BR=no; WD=no
+  has_binder && BR=yes
+  { [ -x "$RT/usr/bin/waydroid" ] || [ -e "$RT/usr/bin/waydroid" ]; } && WD=yes
+  if [ "$BR" = yes ] && [ "$WD" = yes ]; then
+    say "binder + waydroid hain -> install kar rahe hain:"
+    pk-chroot /usr/bin/waydroid app install "$RT${d#/}/$name.apk" 2>&1 | tail -3
+    return $?
+  fi
+  cat <<TXT
+  Chalane ke liye chahiye: (1) kernel me binderfs, (2) waydroid + GSI image.
+  Commands:
+    pk-android enable            # binderfs try
+    pk-get install -y waydroid lxc
+    sudo waydroid init -s GAPPS -f <gsi.img.xz>     # host/real PC par
+    pk-run --install $apk                            # phir ye
+TXT
+  mark "ANDROID-INSTALL-PLANNED ($name)"
+  return 0
+}
+
+kernel_frag() {
+  cat <<'TXT'
+# pk's OS :: Android-container kernel fragment (make kernel me ye add ho jaata hai)
+CONFIG_ANDROID_BINDERFS=y
+CONFIG_ANDROID_BINDER_DEVICES="binder,hwbinder,vndbinder"
+CONFIG_ASHMEM=y
+CONFIG_DMA_SHARED_BUFFER=y
+CONFIG_TMPFS=y
+CONFIG_MEMFD_CREATE=y           # (6.x me built-in)
+CONFIG_NAMESPACES=y
+CONFIG_USER_NS=y
+CONFIG_UTS_NS=y
+CONFIG_PID_NS=y
+CONFIG_NET_NS=y
+CONFIG_SECCOMP=y
+CONFIG_CGROUPS=y
+CONFIG_CGROUP_SCHED=y
+CONFIG_MEMCG=y
+# Waydroid/LXC ko ye bhi chahiye:
+CONFIG_OVERLAY_FS=y
+CONFIG_VETH=y
+CONFIG_BRIDGE=y
+TXT
+}
+
+case "${1:-}" in
+  doctor|check|"") doctor ;;
+  enable|binderfs) do_enable ;;
+  install) shift; do_install "${1:-}" ;;
+  list)
+    echo "apk extracts: $(ls "$APPS/apk" 2>/dev/null | tr '\n' ' ')"
+    if runtime_ok && [ -x "$RT/usr/bin/waydroid" ]; then pk-chroot /usr/bin/waydroid status 2>&1 | head -5; fi ;;
+  kernel-frag|config) kernel_frag ;;
+  --help|-h) sed -n '2,12p' "$0" ;;
+  *) warn "unknown: $1"; exit 1 ;;
+esac

@@ -1,0 +1,60 @@
+# pk's OS :: initramfs me daale jaane wale kernel modules (top-level names).
+# Build script `modprobe --show-depends` se inka full dependency closure nikaalta
+# hai, .ko.xz/.zst decompress karke /mods/NN-name.ko ke naam se order me rakhta hai.
+# Jo module kernel me built-in (=y) hai woh automatically skip ho jaata hai.
+
+# --- boot / root mount ke liye must
+loop
+squashfs
+overlay
+ext4
+isofs
+udf
+vfat
+fat
+
+# --- compression (squashfs ke liye)
+zlib
+zlib_deflate
+zstd_decompress
+lz4_decompress
+lzo_decompress
+
+# --- filesystems jo live/USB pe mil sakte hain (ntfs3/btrfs/xfs live me modprobe honge)
+exfat
+
+# --- block / storage
+sd_mod
+sr_mod
+ata_piix
+libata
+ahci
+ata_generic
+nvme
+nvme-core
+usb-storage
+uas
+virtio_blk
+virtio_pci
+virtio_mmio
+mmc_block
+
+# --- usb host controllers
+xhci-hcd
+ehci-pci
+ehci-platform
+ohci-pci
+ohci-platform
+uhci-hcd
+
+# --- keyboard / mouse
+i8042
+atkbd
+mousedev
+usbhid
+hid_generic
+
+# --- network yahan JAAN BUJH KAR NAHI: initramfs ko disk dhoondhne ke liye net
+# chahiye hi nahi. NIC drivers live rootfs ke /lib/modules me hain (dhimi par
+# sahi jagah), wahan modprobe/se aa jayenge. Net drivers yahan daalne se initrd
+# ~4MB bhaari hoti hai aur boot me ~1s extra lagta hai - fayda zero.

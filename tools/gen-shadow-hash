@@ -1,0 +1,26 @@
+#!/bin/sh
+# pk's OS :: root /etc/shadow ka sha-512 hash banao
+#
+#   tools/gen-shadow-hash 'pk'
+#   -> $6$salt$....   (isko rootfs/overlay/etc/shadow me daalo, ya
+#      pk-install --root-password-hash='...' se install karo)
+#
+# host pe koi ek tool chalta hoga - dono try karte hain:
+#   mkpasswd -m sha-512   (whois package)      -> best
+#   openssl passwd -6     (openssl)           -> fine
+#   python3 crypt(3) sha-512                  -> fallback
+set -eu
+PW=${1:-}
+if [ -z "$PW" ]; then
+  printf "password: "; stty -echo 2>/dev/null || true; read -r PW; stty echo 2>/dev/null || true; printf "\n" >&2
+fi
+salt=$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n' | cut -c1-8)
+if command -v mkpasswd >/dev/null 2>&1; then
+  mkpasswd -m sha-512 -S "$salt" "$PW"
+elif command -v openssl >/dev/null 2>&1; then
+  openssl passwd -6 -salt "$salt" "$PW"
+elif command -v python3 >/dev/null 2>&1; then
+  python3 -c 'import crypt,sys; print(crypt.crypt(sys.argv[1], crypt.mksalt(crypt.METHOD_SHA512)))' "$PW"
+else
+  echo "mkpasswd/openssl/python3 koi nahi mila: sudo apt install whois openssl" >&2; exit 1
+fi

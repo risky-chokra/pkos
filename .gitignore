@@ -1,0 +1,11 @@
+# build output
+build/
+*.iso
+*.img
+*.log
+# editor / OS junk
+*.swp
+*~
+.DS_Store
+.vscode/
+.idea/

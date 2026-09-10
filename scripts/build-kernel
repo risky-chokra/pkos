@@ -1,0 +1,110 @@
+#!/bin/sh
+# pk's OS :: apna custom kernel banao (optional, par mazedar)
+#
+#   scripts/build-kernel              download + configure + build + modules_install
+#   scripts/build-kernel config       sirf config regenerate karo
+#   make iso PK_KERNEL=$PWD/build/kernel-6.12/bzImage \
+#            PK_MODULES=$PWD/build/kernel-6.12/modules
+#
+# Config philosophy: boot ke liye chahiye = built-in (=y), optional hardware = module (=m).
+# Isliye initramfs me sirf loop/squashfs/overlay/ext4/vfat/isofs jaate hain aur ISO chhoti rehti hai.
+# shellcheck shell=sh disable=SC3030,SC2086
+set -eu
+
+PK_ROOT=$(cd "$(dirname "$0")/.." && pwd); export PK_ROOT
+# shellcheck disable=SC1091
+. "$PK_ROOT/scripts/pk.sh"
+
+KV=${PK_KVER:-6.12}
+SRC=${PK_KSRC:-$BUILD/linux-$KV}
+DL=$BUILD/dl
+JOBS=${JOBS:-$( (nproc 2>/dev/null || echo 2) )}
+OUTDIR=$BUILD/kernel-$KV
+TARBALL=https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-$KV.tar.xz
+
+have gcc || die "gcc chahiye (build-essential)"
+have make || die "make chahiye"
+have flex || die "flex chahiye: sudo apt install flex bison libelf-dev libssl-dev bc rsync"
+have bison || die "bison chahiye: sudo apt install flex bison libelf-dev libssl-dev bc rsync"
+
+mkdir -p "$DL" "$OUTDIR"
+
+# ---------------------------------------------------------------- source
+if [ ! -d "$SRC" ]; then
+  if [ ! -f "$DL/linux-$KV.tar.xz" ]; then
+    log "kernel source download (~150MB)..."
+    have curl && curl -fL --retry 3 -o "$DL/linux-$KV.tar.xz" "$TARBALL" ||
+      wget -O "$DL/linux-$KV.tar.xz" "$TARBALL" || die "download fail"
+  fi
+  log "extract (1-2 min)..."
+  mkdir -p "$BUILD"
+  rm -rf "$SRC"
+  tar -xf "$DL/linux-$KV.tar.xz" -C "$BUILD"
+  [ -d "$SRC" ] || die "extract fail: $SRC nahi bana"
+fi
+cd "$SRC"
+
+# ---------------------------------------------------------------- config
+CFG_ENABLE="
+BLK_DEV_LOOP SQUASHFS SQUASHFS_ZSTD SQUASHFS_LZ4 SQUASHFS_XOR SQUASHFS_FILE_CACHE
+OVERLAY_FS EXT4_FS JBD2 MBCACHE ISO9660_FS UDF_FS VFAT_FS FAT_DEFAULT_UTF8
+EXFAT_FS NTFS3_FS NLS_UTF8 NLS_CODEPAGE_437 NLS_ISO8859_1 XFS_FS PARTITION_ADVANCED
+MSDOS_FS EFI_PARTITION LIBCRC32C CRC32 CRC_T10DIF CRC16 XOR_BLOCKS RAID6_PQ
+ZSTD_COMPRESS ZSTD_DECOMPRESS XXHASH LZ4_COMPRESS LZ4_DECOMPRESS
+BLK_DEV_SD SR_MOD CDROM ATA LIBATA AHCI PATA_PIIX ATA_GENERIC NVME_CORE BLK_DEV_NVME
+MMC_BLOCK USB_STORAGE USB_UAS USB_XHCI_HCD USB_EHCI_HCD USB_OHCI_HCD USB_UHCI_HCD
+VIRTIO_BLK VIRTIO_PCI VIRTIO_NET VIRTIO_CONSOLE VIRTIO_BALLOON
+SERIO SERIO_I8042 INPUT_KEYBOARD INPUT_MOUSE HID HID_GENERIC USB_HID
+VT VT_CONSOLE VGA_CONSOLE SERIAL_8250 SERIAL_8250_CONSOLE HW_CONSOLE
+EFI EFI_STUB EFI_HANDOVER EFIVAR_FS EFIVAR UNIX INET TMPFS_XATTR
+MODULE_COMPRESS_XZ MODULE_DECOMPRESS ZRAM
+"
+CFG_DISABLE="DEBUG_INFO DEBUG_INFO_BTF DEBUG_KERNEL KASAN KCSAN GDB_SCRIPTS KALLSYMS_EXTRA_PASS"
+
+genconfig() {
+  log "kernel config generate (defconfig + pk's OS tweaks)"
+  make defconfig > /dev/null
+  for o in $CFG_ENABLE; do
+    scripts/config --enable "$o" 2>/dev/null || warn "  (skip, unknown symbol: $o)"
+  done
+  for o in $CFG_DISABLE; do
+    scripts/config --disable "$o" 2>/dev/null || true
+  done
+  # boot-critical cheezein module ke roop me na rahein
+  for o in BLK_DEV_LOOP SQUASHFS OVERLAY_FS EXT4_FS ISO9660_FS VFAT_FS; do
+    if grep -qE "^CONFIG_$o=m$" .config; then
+      warn "  CONFIG_$o abhi bhi =m -> =y kar raha hoon (boot ke liye must)"
+      scripts/config --enable "$o"
+    fi
+  done
+  make olddefconfig > /dev/null
+  echo "  --- boot-critical config ---"
+  grep -E "^CONFIG_(SQUASHFS|OVERLAY_FS|EXT4_FS|BLK_DEV_LOOP|ISO9660_FS|VFAT_FS|EFI_STUB|VT)=" .config | sed 's/^/    /'
+  log "config: $SRC/.config"
+}
+
+[ "${1:-}" = config ] && { cd "$SRC" && genconfig; exit 0; }
+[ -f .config ] || genconfig
+
+if [ -f "$OUTDIR/bzImage" ] && [ -z "${PK_FORCE_BUILD:-}" ]; then
+  log "pehle se bana hua hai: $OUTDIR/bzImage  (dobara build ke liye PK_FORCE_BUILD=1)"
+  exit 0
+fi
+
+# ---------------------------------------------------------------- build
+log "kernel build: make -j$JOBS (is machine pe 20-90 min lag sakte hain)"
+log "  output: $OUTDIR/bzImage + $OUTDIR/modules"
+KLOG=$BUILD/kernel-build.log
+if ! make -j"$JOBS" bzImage modules > "$KLOG" 2>&1; then
+  tail -30 "$KLOG" | sed 's/^/  | /'
+  die "kernel build fail - pura log: $KLOG"
+fi
+tail -3 "$KLOG" | sed 's/^/  /' 
+make modules_install INSTALL_MOD_PATH="$OUTDIR" >/dev/null 2>&1
+KVER=$(make kernelrelease)
+mkdir -p "$OUTDIR"
+cp -f arch/x86/boot/bzImage "$OUTDIR/bzImage"
+printf 'version=%s\nbzImage=%s\nmodules=%s/modules\n' "$KVER" "$OUTDIR/bzImage" "$OUTDIR" > "$OUTDIR/info"
+log "done. Ab:"
+log "  make clean-rootfs && make iso PK_KERNEL=$OUTDIR/bzImage PK_MODULES=$OUTDIR/modules"
+log "  (PK_MODULES ke saath 'make iso' us version ke modules live image me daal dega)"

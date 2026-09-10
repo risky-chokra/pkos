@@ -1,0 +1,86 @@
+#!/bin/sh
+# pk's OS :: display server (GUI apps ke liye) - runtime ke andar weston/Xorg/Xvfb
+#   pk-x start            # jo mile usse session uthao (weston -> Xorg -> Xvfb)
+#   pk-x start weston     # specific
+#   pk-x status | stop
+# Phir:  pk-run --gui <app>
+set -u
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+RT=${PK_RUNTIME_ROOT:-/opt/pk}
+ENVR=/run/pk/x-env
+PIDF=/run/pk/x.pid
+LOGF=/run/pk/x.log
+have() { command -v "$1" >/dev/null 2>&1; }
+mounted() { grep -q " $1 " /proc/mounts 2>/dev/null; }
+say() { printf 'pk-x: %s\n' "$*"; }
+rbin() { [ -x "$RT/usr/bin/$1" ] || [ -x "$RT/bin/$1" ]; }
+
+start() {
+  want=${1:-auto}
+  mounted "$RT" || { say "runtime attach nahi hai -> pk-runtime start"; exit 64; }
+  [ "$want" = auto ] && for c in weston Xorg Xvfb; do rbin "$c" && { want=$c; break; }; done
+  case "$want" in
+    weston)
+      for d in /dev/dri /dev/input; do
+        [ -e "$d" ] && { mkdir -p "$RT$d"; mounted "$RT$d" || mount --bind "$d" "$RT$d" 2>/dev/null || true; }
+      done
+      mkdir -p "$RT/run/pk-x"; chmod 700 "$RT/run/pk-x"
+      say "weston (Wayland) tty7 par start - console switch: Ctrl+Alt+F7"
+      pk-chroot /bin/sh -c 'mkdir -p /run/pk-x; chmod 700 /run/pk-x; export XDG_RUNTIME_DIR=/run/pk-x; exec weston --socket=wayland-1 --renderer=gl 2>/dev/null || exec weston --backend=drm-backend.so --socket=wayland-1' >"$LOGF" 2>&1 &
+      echo $! > "$PIDF"
+      printf 'WAYLAND_DISPLAY=wayland-1\nXDG_RUNTIME_DIR=%s\nDISPLAY=\n' "$RT/run/pk-x" > /run/pk/x-env
+      ;;
+    Xorg)
+      say "X11 server :0 (DRM/KMS) start"
+      pk-chroot /bin/sh -c 'exec Xorg :0 -ac vt7' >"$LOGF" 2>&1 &
+      echo $! > "$PIDF"
+      printf 'DISPLAY=:0\n' > "$ENVR"
+      ;;
+    Xvfb)
+      say "headless X11 (:0, 1280x800x24) - VNC ke liye: pk-x --vnc"
+      pk-chroot /bin/sh -c 'exec Xvfb :0 -screen 0 1280x800x24' >"$LOGF" 2>&1 &
+      echo $! > "$PIDF"
+      printf 'DISPLAY=:0\n' > "$ENVR"
+      ;;
+    none|'')
+      say "runtime me koi display server nahi (weston/Xorg/Xvfb). Install karo:"
+      say "  pk-get install -y weston xterm        # Wayland, DRM/KMS par direct"
+      say "  pk-get install -y xvfb x11vnc         # headless + VNC"
+      say "  pk-get install -y xserver-xorg xterm  # X11 (intel/amd/nouveau/fbdev)"
+      exit 65 ;;
+    *) say "unknown server: $want (weston|Xorg|Xvfb)"; exit 1 ;;
+  esac
+  i=0
+  while [ $i -lt 20 ]; do
+    [ -s "$ENVR" ] && break
+    sleep 1; i=$((i + 1))
+  done
+  . "$ENVR" 2>/dev/null || true
+  say "env: $ENVR (apps ke liye pk-run --gui use karo)"
+  return 0
+}
+
+status() {
+  if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then
+    echo "pk-x: session chal raha hai (pid $(cat "$PIDF"))"
+    [ -r "$ENVR" ] && sed 's/^/  /' "$ENVR"
+  else
+    echo "pk-x: koi session nahi.  pk-x start"
+  fi
+  [ -s "$LOGF" ] && { echo "  last log:"; tail -6 "$LOGF" | sed 's/^/    /'; }
+}
+
+stop() {
+  [ -f "$PIDF" ] && { kill "$(cat "$PIDF")" 2>/dev/null; rm -f "$PIDF"; }
+  pk-chroot /bin/sh -c 'pkill -f "weston|Xvfb|Xorg" 2>/dev/null' 2>/dev/null || true
+  rm -f "$ENVR"
+  say "band kiya"
+}
+
+case "${1:-status}" in
+  start) shift; start "${1:-auto}" ;;
+  stop)  shift; stop ;;
+  status) status ;;
+  *) echo "usage: pk-x [start [weston|Xorg|Xvfb]|stop|status]"; exit 1 ;;
+esac
+exit 0

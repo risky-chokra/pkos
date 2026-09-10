@@ -1,0 +1,187 @@
+#!/bin/sh
+# pk's OS :: app runtime builder
+#   ek Debian (ya busybox) userland squashfs banata hai jisse OS me "koi bhi Linux app"
+#   (aur Wine se Windows app) direct chal jaaye. Runtime base ISO me nahi hota -
+#   alag file/partition pe rehta hai, boot par /opt/pk par mount hota hai.
+#
+# usage: scripts/make-runtime [--tiny] [--variant=lean|full|dev] [--pkgs=a,b]
+#                             [--out=build/pk-runtime.sqfs] [--rw-mb=1024] [--no-rw]
+set -eu
+PK_ROOT=$(cd "$(dirname "$0")/.." && pwd); export PK_ROOT
+# shellcheck disable=SC1091
+. "$PK_ROOT/scripts/pk.sh"
+
+OUT=$BUILD/pk-runtime.sqfs
+RWOUT=$BUILD/pk-runtime-rw.img
+VARIANT=${RUNTIME_VARIANT:-lean}
+PKGS=${RUNTIME_PKGS:-}
+RW_MB=${RUNTIME_RW_MB:-1024}
+MAKE_RW=1
+TINY=0
+SUIT=$WORK/runtime
+DEB_MIRROR=${RUNTIME_MIRROR:-http://deb.debian.org/debian}
+DEB_DIST=${RUNTIME_DIST:-bookworm}
+
+# args: --opt=val aur --opt val dono chalte hain
+need_val() { [ -n "${2:-}" ] || die "$1 ke saath value do"; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --tiny)    TINY=1; shift ;;
+    --no-rw)   MAKE_RW=0; shift ;;
+    --variant) need_val "$1" "${2:-}"; VARIANT=$2; shift 2 ;;
+    --variant=*) VARIANT=${1#*=}; shift ;;
+    --pkgs)    need_val "$1" "${2:-}"; PKGS=$2; shift 2 ;;
+    --pkgs=*)  PKGS=${1#*=}; shift ;;
+    --out)     need_val "$1" "${2:-}"; OUT=$2; shift 2 ;;
+    --out=*)   OUT=${1#*=}; shift ;;
+    --rw)      need_val "$1" "${2:-}"; RWOUT=$2; shift 2 ;;
+    --rw=*)    RWOUT=${1#*=}; shift ;;
+    --rw-mb)   need_val "$1" "${2:-}"; RW_MB=$2; shift 2 ;;
+    --rw-mb=*) RW_MB=${1#*=}; shift ;;
+    --dist)    need_val "$1" "${2:-}"; DEB_DIST=$2; shift 2 ;;
+    --dist=*)  DEB_DIST=${1#*=}; shift ;;
+    -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
+    *) die "unknown option: $1" ;;
+  esac
+done
+
+# tiny (QA) aur real (Debian) tree ALAG rakhte hain — warna `make test-apps` ka
+# tiny run build/work/runtime ko overwrite karke asli Debian tree uda deta hai.
+[ "$TINY" = 1 ] && SUIT=$WORK/runtime-tiny
+
+# tree prep ek hi privilege se hoti hai; agar sudo laga to tree ko wapas caller ke
+# haath de dete hain, taaki next bina-sudo run permission error na de (yeh bug tha).
+if [ "$(id -u)" = 0 ]; then
+  run_as() { "$@"; }
+elif have sudo; then
+  run_as() { sudo "$@"; }
+else
+  run_as() { "$@"; }
+fi
+run_as2() { run_as "$@"; }
+run_as rm -rf "$SUIT"
+run_as mkdir -p "$SUIT"
+if [ "$(id -u)" != 0 ] && have sudo; then
+  run_as chown -R "$(id -u):$(id -g)" "$SUIT" 2>/dev/null || true
+fi
+
+# ---------------------------------------------------------------- tiny variant (QA)
+# debootstrap ke bina, ek chhota par asli runtime: busybox + /usr/bin + /usr/lib,
+# taaki mount/overlay/chroot/dispatch ka poora flow test ho sake.
+if [ "$TINY" = 1 ]; then
+  log "tiny runtime (busybox-based) -> $SUIT"
+  for d in bin sbin usr/bin usr/sbin usr/lib usr/lib/x86_64-linux-gnu lib lib64 etc/ssl var/lib/dpkg \
+           proc sys dev tmp root home opt var/log var/cache etc/apt; do
+    mkdir -p "$SUIT/$d"
+  done
+  cp -a /bin/busybox "$SUIT/bin/busybox" 2>/dev/null || cp -a "$(command -v busybox)" "$SUIT/bin/busybox"
+  for a in sh ash ls cat echo mount umount chroot tar gzip unxz ar awk sed grep cp mv mkdir rm ln printf sleep \
+           readlink basename dirname cut tr head tail wc find expr test true false which \
+           env stat stat-1 sleep expr1 install; do
+    ln -sf busybox "$SUIT/bin/$a" 2>/dev/null || true
+  done
+  # fake wine + waydroid: dispatch path test karne ke liye marker print karte hain
+  cat > "$SUIT/usr/bin/wine" <<'FW'
+#!/bin/sh
+# tiny-runtime fake wine (QA ke liye): args echo karta hai
+echo "fake-wine: exec $*"
+if [ "${1:-}" = "--version" ]; then echo "wine-9.0-tiny"; exit 0; fi
+case " $* " in
+  *" msiexec "*) echo "fake-wine: msiexec install ok" ;;
+esac
+for a in "$@"; do
+  case "$a" in *.exe) echo "fake-wine: ran $(basename "$a") (pe header: $(head -c2 "$a" 2>/dev/null | tr -d '\0'))" ;; esac
+done
+exit 0
+FW
+  cat > "$SUIT/usr/bin/waydroid" <<'FA'
+#!/bin/sh
+echo "fake-waydroid: $*"
+exit 0
+FA
+  cat > "$SUIT/usr/bin/java" <<'FJ'
+#!/bin/sh
+# tiny-runtime fake java (QA ke liye): -jar <f> ko echo karta hai
+for a in "$@"; do
+  case "$a" in
+    *.jar) echo "JAVA-STUB-RAN $a"; exit 0 ;;
+  esac
+done
+case "$1" in -version|--version) echo 'openjdk version "17.0.0-fake" (pk tiny-stub)'; exit 0 ;; esac
+echo "fake-java: args $*"
+exit 0
+FJ
+  chmod 755 "$SUIT/usr/bin/wine" "$SUIT/usr/bin/waydroid" "$SUIT/usr/bin/java"
+  # "app" jo runtime ke andar se chalaya ja sakta hai (static busybox hi kaafi hai)
+  cat > "$SUIT/usr/bin/pk-tiny-app" <<'APP'
+#!/bin/sh
+echo "tiny-runtime app: hello from pk runtime"
+APP
+  chmod 755 "$SUIT/usr/bin/pk-tiny-app"
+  printf '%s\n' "pk's OS tiny runtime (QA)" > "$SUIT/etc/pk-runtime-release"
+  printf '%s\n' "APT::Get::Assume-Yes \"true\";" > "$SUIT/etc/apt.conf" 2>/dev/null || true
+else
+  # ------------------------------------------------------------ real Debian runtime
+  have debootstrap || die "debootstrap chahiye -> sudo apt-get install -y debootstrap"
+  [ "$(id -u)" = 0 ] || SUDO_OK=1   # debootstrap ke liye
+  have sudo >/dev/null 2>&1 || SUDO_OK=0
+  case " ${PATH} " in *" /usr/sbin "*|*" /sbin "*) : ;; *) export PATH="$PATH:/usr/sbin:/sbin" ;; esac
+  log "debootstrap $DEB_DIST ($VARIANT) -> $SUIT  (kuch minute lagenge)"
+  case "$VARIANT" in
+    lean) EXTRA="hello,vim-tiny,htop,wget,ca-certificates" ;;
+    full) EXTRA="apt-utils,ca-certificates,vim,htop,wget,curl,less,file,man,dialog,locales,sudo" ;;
+    desktop) EXTRA="apt-utils,ca-certificates,vim-tiny,htop,wget,curl,less,file,locales,sudo,ca-certificates" ;;
+    dev)  EXTRA="build-essential,git,make,pkg-config,apt-utils,ca-certificates,vim,htop,wget,curl,less,file" ;;
+    *)    EXTRA="" ;;
+  esac
+  [ -n "$PKGS" ] && EXTRA=$PKGS
+  run_as debootstrap --variant=minbase --include="$EXTRA" --arch=amd64 "$DEB_DIST" "$SUIT" "$DEB_MIRROR"
+  # hygiene: cache/man/docs hatao (size ka farak)
+  # hygiene: cache/man/docs hatao. apt ki *lists* (package index) RAKHTE hain —
+  # unke bina guest me pehla `pk-get install` 40 MB index download + parse karta hai
+  # (320 MB VM me 10 min lagte hain). Lists ke saath install sirf .deb khinchta hai.
+  # RUNTIME_KEEP_LISTS=0 do to image chhoti (par pehla update guest me khud chalega).
+  if [ "${RUNTIME_KEEP_LISTS:-1}" = 1 ]; then
+    run_as sh -c "rm -rf '$SUIT'/var/cache/apt/archives/*.deb '$SUIT'/usr/share/man '$SUIT'/usr/share/doc/* '$SUIT'/var/lib/apt/lists/partial 2>/dev/null; true"
+    [ -d "$SUIT/var/lib/apt/lists" ] && log "  apt lists: $(du -sh "$SUIT/var/lib/apt/lists" 2>/dev/null | cut -f1) (image me rahengi)" || warn "  apt lists nahi mili (guest me pehla install update karega)"
+  else
+    run_as sh -c "rm -rf '$SUIT'/var/cache/apt/archives/*.deb '$SUIT'/usr/share/man '$SUIT'/usr/share/doc/* '$SUIT'/var/lib/apt/lists/* 2>/dev/null; true"
+  fi
+  if [ "$VARIANT" = full ] || [ "$VARIANT" = desktop ]; then
+    log "$VARIANT variant: GUI stack (weston + xterm + Xvfb + mesa) + wine install (lamba chalega)"
+    run_as chroot "$SUIT" /bin/sh -c \
+      "apt-get update -qq && apt-get install -y --no-install-recommends wine mesa-utils weston xterm xvfb x11-utils x11-xkb-utils xkb-data" >/dev/null 2>&1 || \
+      warn "wine/weston install fail (baad me runtime ke andar 'pk-get install -y wine' se kar lena)"
+  fi
+  printf '%s\n' "pk's OS runtime: Debian $DEB_DIST ($VARIANT) built $(date -u +%Y-%m-%dT%H:%MZ)" > "$SUIT/etc/pk-runtime-release"
+fi
+
+# ---------------------------------------------------------------- squash it
+log "mksquashfs -> $OUT"
+have mksquashfs || die "squashfs-tools chahiye"
+rm -f "$OUT"
+mksquashfs "$SUIT" "$OUT" -comp zstd -b 1048576 -noappend -all-root > "$WORK/make-runtime.log" 2>&1
+log "  runtime: $(du -h "$OUT" | cut -f1) -> $OUT"
+
+# ---------------------------------------------------------------- rw overlay image
+if [ "$MAKE_RW" = 1 ]; then
+  log "rw overlay image -> $RWOUT (${RW_MB} MiB, sparse)"
+  rm -f "$RWOUT"
+  dd if=/dev/zero of="$RWOUT" bs=1M count="$RW_MB" status=none conv=sparse
+  mkfs.ext4 -q -F -L pk-runtime-rw "$RWOUT"
+  mnt=$WORK/runtime-rw-mnt; mkdir -p "$mnt"
+  run_as2 mount -o loop "$RWOUT" "$mnt"
+  run_as2 mkdir -p "$mnt/pk-runtime/upper" "$mnt/pk-runtime/work"
+  run_as2 chmod 755 "$mnt/pk-runtime" "$mnt/pk-runtime/upper" "$mnt/pk-runtime/work"
+  run_as2 sync; run_as2 umount "$mnt" 2>/dev/null || true
+  log "  rw img: $(du -h "$RWOUT" | cut -f1) (apparent size; disk par sparse)"
+fi
+
+cat <<TXT
+
+runtime ready. use karne ke 3 tarike:
+  1) ISO me daal do :  make iso WITH_RUNTIME=1        (sab kuch ek hi image me)
+  2) USB ke free space me partition : (boot karke)  pk-runtime --setup $OUT
+  3) kisi bhi ext4/vfat partition ki root me rakho : pk-runtime.sqfs  (+ pk-runtime-rw.img)
+Boot par /opt/pk par mount ho jaayega; phir:  pk-shell | pk-get install -y <pkg> | pk-run ./app
+TXT

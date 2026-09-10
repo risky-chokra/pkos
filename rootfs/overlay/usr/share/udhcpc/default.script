@@ -1,0 +1,64 @@
+#!/bin/sh
+# pk's OS :: udhcpc hook - lease milne par IP/route/DNS set karta hai.
+# busybox udhcpc isse $1 = bound|renew|deconfig|release ke saath bulate hai.
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+[ -n "$1" ] || exit 1
+[ -n "$interface" ] || interface=${1:-eth0}
+
+netmask_to_prefix() {
+  case "$1" in
+    255.255.255.255) echo 32 ;; 255.255.255.128) echo 25 ;; 255.255.255.192) echo 26 ;;
+    255.255.255.224) echo 27 ;; 255.255.255.240) echo 28 ;; 255.255.255.248) echo 29 ;;
+    255.255.255.0)   echo 24 ;; 255.255.254.0)  echo 23 ;; 255.255.252.0)  echo 22 ;;
+    255.255.0.0)    echo 16 ;; 255.255.128.0)  echo 17 ;; 255.255.192.0)  echo 18 ;;
+    255.0.0.0)      echo 8  ;; 255.128.0.0)    echo 9  ;; 255.192.0.0)     echo 10 ;;
+    255.224.0.0)    echo 11 ;; 255.240.0.0)    echo 12 ;; 255.248.0.0)    echo 13 ;;
+    255.252.0.0)    echo 14 ;; 255.254.0.0)    echo 15 ;;
+    *) echo 24 ;;
+  esac
+}
+
+write_dns() {
+  tmp=/etc/resolv.conf.$$
+  {
+    [ -n "${domain:-}" ] && echo "search $domain"
+    for d in ${dns:-}; do echo "nameserver $d"; done
+  } > "$tmp" 2>/dev/null
+  [ -s "$tmp" ] && mv -f "$tmp" /etc/resolv.conf || rm -f "$tmp"
+  return 0
+}
+
+PFX=$(netmask_to_prefix "${subnet:-255.255.255.0}")
+
+case $1 in
+  bound|renew)
+    if command -v ip >/dev/null 2>&1; then
+      ip link set "$interface" up 2>/dev/null
+      cur=$(ip addr show dev "$interface" 2>/dev/null | awk '/inet /{print $2}')
+      if [ "$cur" != "${ip}/${PFX}" ]; then
+        ip addr flush dev "$interface" 2>/dev/null
+        [ -n "${ip:-}" ] && ip addr add "${ip}/${PFX}" dev "$interface" 2>/dev/null
+      fi
+      if [ -n "${router:-}" ]; then
+        for g in $router; do
+          ip route replace default via "$g" dev "$interface" 2>/dev/null && break
+        done
+      fi
+    else
+      [ -n "${ip:-}" ] && ifconfig "$interface" "$ip" netmask "${subnet:-255.255.255.0}" up 2>/dev/null
+      if [ -n "${router:-}" ]; then
+        route del default 2>/dev/null
+        for g in $router; do route add default gw "$g" 2>/dev/null && break; done
+      fi
+    fi
+    write_dns
+    ;;
+  deconfig|release)
+    if command -v ip >/dev/null 2>&1; then
+      ip addr flush dev "$interface" 2>/dev/null
+    else
+      ifconfig "$interface" 0.0.0.0 2>/dev/null
+    fi
+    ;;
+esac
+exit 0

@@ -1,0 +1,45 @@
+#!/bin/sh
+# pk's OS :: runtime ke andar apt-get (Linux apps install karne ke liye)
+#   pk-get update
+#   pk-get install -y htop wine  default-jre-headless
+#   pk-get install -y /path/to/app.deb
+#   pk-get -y htop                 (chhota shortcut: install -y)
+# Network chahiye: 'pk-net dhcp' (ya boot option pk_net=dhcp) pehle.
+set -u
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+rt=${PK_RUNTIME_ROOT:-/opt/pk}
+if ! grep -q " $rt " /proc/mounts 2>/dev/null; then
+  echo "pk-get: runtime attached nahi hai. 'pk-runtime start' chalao, ya WITH_RUNTIME=1 wali ISO use karo." >&2
+  echo "        (runtime banane ke liye host pe: scripts/make-runtime)" >&2
+  exit 64
+fi
+ip=$(ip -4 addr show 2>/dev/null | awk '/inet /{if($2!~/^127\./){print $2; exit}}')
+[ -n "${ip:-}" ] || echo "pk-get: warning - koi IP nahi hai (DHCP ke liye: pk-net dhcp)" >&2
+
+if [ $# = 0 ]; then
+  set -- update
+else
+  case "$1" in
+    -y|--yes) shift; set -- install -y "$@" ;;
+  esac
+fi
+
+# runtime image chhota rakhne ke liye apt ki package lists hata di jaati hain;
+# bina 'update' ke install "Unable to locate package" dega -> khud update karte hain.
+need_update=0
+case "$1" in
+  install|remove|purge|upgrade|autoremove|search|show)
+    if ! ls "$rt/var/lib/apt/lists" 2>/dev/null | grep -q '_Packages\|_Sources\|Packages'; then
+      need_update=1
+    fi ;;
+esac
+if [ "$need_update" = 1 ]; then
+  echo "pk-get: apt lists khali hain -> pehle 'apt-get update' (net se, ek bar)" >&2
+  pk-chroot /usr/bin/apt-get update -qq -o 'Acquire::Retries=2' >&2 || \
+    echo "pk-get: update fail hua (net/debian mirror check karo) - install phir bhi try kar rahe hain" >&2
+fi
+
+case "$1" in
+  update|upgrade|install|remove|purge|autoremove|search|show) exec pk-chroot /usr/bin/apt-get "$@" ;;
+esac
+exec pk-chroot /usr/bin/apt-get "$@"

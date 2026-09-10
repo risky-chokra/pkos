@@ -1,0 +1,88 @@
+#!/bin/sh
+# pk's OS :: grub-mkrescue se bootable isohybrid ISO (BIOS + UEFI)
+# layout:  /boot/pk-kernel  /boot/pk-initrd  /live/pk.sqfs  README.txt
+set -eu
+PK_ROOT=$(cd "$(dirname "$0")/.." && pwd); export PK_ROOT
+# shellcheck disable=SC1091
+. "$PK_ROOT/scripts/pk.sh"
+
+ISO=$OUT
+STAGE=$WORK/iso
+resolve_kernel
+
+[ -f "$WORK/iso/live/pk.sqfs" ] || die "pehle: scripts/mk-squashfs"
+[ -f "$WORK/iso/boot/pk-initrd" ] || die "pehle: scripts/mk-initrd"
+have grub-mkrescue || die "grub-mkrescue nahi mila -> sudo apt install grub-pc-bin grub-efi-amd64-bin xorriso mtools"
+
+log "ISO stage: $STAGE"
+# stage me jo files is build ne nahi banaye, unhe phase kiyo (duplicate boot images)
+mkdir -p "$STAGE/boot" "$STAGE/live"
+find "$STAGE/boot" -maxdepth 1 -mindepth 1 ! -name pk-kernel ! -name pk-initrd \
+     ! -name grub -exec rm -rf {} + 2>/dev/null || true
+find "$STAGE/live" -maxdepth 1 -mindepth 1 ! -name pk.sqfs \
+     -exec rm -f {} + 2>/dev/null || true
+# runtime pichhli baar stage me pada rahe to bina WITH_RUNTIME wali ISO me bhi
+# ghuss jaata tha (349 MB!) -> hamesha pehle hatao, phir maangne par daalo
+rm -f "$STAGE/live/pk-runtime.sqfs"
+install -m 0644 "$KERNEL" "$STAGE/boot/pk-kernel"
+
+# app runtime (optional): WITH_RUNTIME=1 -> ISO ke andar /live/pk-runtime.sqfs
+RTIMG=${PK_RUNTIME_IMG:-$BUILD/pk-runtime.sqfs}
+if [ "${WITH_RUNTIME:-0}" = 1 ] || [ -n "${PK_RUNTIME_IMG:-}" ]; then
+  [ -f "$RTIMG" ] || die "runtime image nahi mila: $RTIMG  (pehle: make runtime)"
+  install -m 0644 "$RTIMG" "$STAGE/live/pk-runtime.sqfs"
+  log "  + app runtime: $(du -h "$RTIMG" | cut -f1) -> /live/pk-runtime.sqfs"
+fi
+
+# grub menu (template se @ARGS@/@LABEL@/@VER@ bharte hain)
+mkdir -p "$STAGE/boot/grub"
+args=${KERNEL_CMDLINE:-"quiet loglevel=3"}
+[ -n "${PK_TEST_CMDLINE:-}" ] && args="$args $PK_TEST_CMDLINE"
+sed -e "s|@ARGS@|$args|g" \
+    -e "s|@LABEL@|${ISO_LABEL:-PKOS}|g" \
+    -e "s|@VER@|${OS_VERSION:-1.0}|g" \
+    "$PK_ROOT/init/grub.cfg" > "$STAGE/boot/grub/grub.cfg"
+
+# ISO ke andar ek README (USB me mount karne par dikhega)
+cat > "$STAGE/README.txt" <<TXT
+pk's OS ${OS_VERSION:-1.0} live
+=========================
+Ye ISO hybrid hai: ise CD pe burn bhi kar sakte ho aur
+  dd if=pkos.iso of=/dev/sdX bs=4M status=progress oflag=sync
+se USB pe likh bhi sakte ho (BIOS + UEFI dono se boot karega).
+
+Boot menu options:
+  live                 - RAM me overlay, reboot pe sab reset
+  toram                - image pehle RAM me copy, phir USB nikaal lo
+  persistent           - agar USB pe PK-PERSIST (ext4) partition hai to changes wahan
+  install to disk      - internal disk pe install karne wala installer
+  debug                - kernel logs + init shell prompt
+
+Live login: user 'root' password 'pk'  (autologin ON hai, so normally prompt nahi aayega)
+
+Keyboard: us layout; console me 'loadkmap' se apna keymap load kar sakte ho.
+Disk me changes: 'pk-persist' helper use karo (docs/persistence.md).
+TXT
+cp "$STAGE/README.txt" "$BUILD/README-ISO.txt" 2>/dev/null || true
+
+log "grub-mkrescue chal raha hai..."
+rm -f "$ISO"
+if ! grub-mkrescue -o "$ISO" "$STAGE" > "$WORK/mk-iso.log" 2>&1; then
+  tail -25 "$WORK/mk-iso.log"
+  die "grub-mkrescue fail (log: $WORK/mk-iso.log)"
+fi
+sz=$(du -h "$ISO" | cut -f1)
+log "ISO ready: $ISO ($sz)"
+# quick sanity: isohybrid MBR + EFI partition table + bootspec
+if have file; then file "$ISO" | sed 's/^/  /'; fi
+# hybrid check: MBR me bootable partition + protective GPT + El Torito EFI
+printf '  isohybrid : '
+if od -An -tx1 -j510 -N2 "$ISO" 2>/dev/null | grep -qi '55 aa'; then echo "MBR magic 55AA present (dd-able)"; else echo "MISSING - USB pe dd se boot nahi karega!"; fi
+printf '  protective GPT: '
+if dd if="$ISO" bs=512 skip=1 count=1 2>/dev/null | head -c 8 | grep -q "EFI PART"; then
+  echo "yes (UEFI-bootable image)"
+else
+  warn "protective GPT nahi mila - UEFI boot issue ho sakta hai"
+fi
+printf '  efi img   : '
+[ -f "$STAGE"/boot/grub/i386-pc/efi.img ] && echo present || echo "(grub-mkrescue ne ISO ke andar banaya)"

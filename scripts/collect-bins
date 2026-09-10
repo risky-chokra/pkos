@@ -1,0 +1,86 @@
+#!/bin/sh
+# pk's OS :: collect-bins <dest-root> <binary...>
+#
+# Host se binaries + unki library closure (ldd) + dynamic loader <dest-root> me
+# copy karta hai, original absolute paths preserve karte hue. Is se bina package
+# management wale squashfs/initrd me bhi binaries chalte hain.
+#
+# NOTE: hum symlinks *recreate* nahi karte (merged-usr par nirbhar padta hai,
+# jisse /lib -> /usr/lib wala relative link staged tree me dangling ho jata hai).
+# Har referenced path par real file copy karte hain - thoda duplication, par guarantee.
+# shellcheck shell=sh disable=SC3030,SC2086,SC2046
+set -eu
+
+[ $# -ge 2 ] || { echo "usage: $0 <dest> <bin...>" >&2; exit 2; }
+dest=$1; shift
+case $dest in /*) : ;; *) dest=$PWD/$dest ;; esac
+mkdir -p "$dest"
+
+seen=$(mktemp 2>/dev/null || echo "$dest/.seen.$$")
+: > "$seen"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+copy_one() { # absolute src path (symlink bhi ho sakta hai)
+  src=$1
+  [ -n "$src" ] || return 0
+  case $src in
+    *linux-vdso*|*libSegFault*|*vgpreload*|*/tdb/*) return 0 ;;
+  esac
+  real=$(readlink -f "$src" 2>/dev/null || printf '%s' "$src")
+  [ -f "$real" ] || return 0
+  grep -qxF "$src" "$seen" 2>/dev/null && return 0
+  printf '%s\n' "$src" >> "$seen"
+
+  dir=$dest$(dirname "$src")
+  mkdir -p "$dir" 2>/dev/null || return 0
+  dstf=$dir/$(basename "$src")
+  # staged tree me pehle se busybox symlink ho sakta hai (tar, mount, e2fsck...)
+  # -> cp us symlink ke THROUGH asal busybox ko destroy kar deta hai. Hatao pehle.
+  if [ -L "$dstf" ]; then rm -f "$dstf"; fi
+  cp -p "$real" "$dstf" 2>/dev/null ||
+    cp "$real" "$dstf" 2>/dev/null || return 0
+  chmod 755 "$dstf" 2>/dev/null || true
+
+  # canonical location bhi exist kare (ld.so /lib64 se refer hota hai)
+  if [ "$real" != "$src" ] && [ -e "$real" ]; then
+    rdir=$dest$(dirname "$real")
+    rdstdir="$rdir/$(basename "$real")"
+    mkdir -p "$rdir" 2>/dev/null || true
+    if [ ! -e "$rdstdir" ] || [ -L "$rdstdir" ]; then
+      rm -f "$rdstdir" 2>/dev/null || true
+      cp -p "$real" "$rdstdir" 2>/dev/null || true
+    fi
+  fi
+
+  if have ldd; then
+    ldd "$real" 2>/dev/null |
+      awk '$1 ~ /^\// {print $1; next} $2 == "=>" && $3 ~ /^\// {print $3}' |
+      while read -r lib; do
+        [ -n "$lib" ] || continue
+        copy_one "$lib" || true
+      done
+  fi
+  return 0
+}
+
+for b in "$@"; do
+  case $b in
+    /*) src=$b ;;
+    *)  src=$(ls -1 "/usr/bin/$b" "/bin/$b" "/usr/sbin/$b" "/sbin/$b" 2>/dev/null | head -1) ;;
+  esac
+  if [ -z "${src:-}" ] || [ ! -e "$src" ]; then
+    echo "  ! not on host, skipping: $b" >&2
+    continue
+  fi
+  echo "  + $b"
+  copy_one "$src"
+done
+
+# dynamic loader hamesha chahiye
+for ld in /lib64/ld-linux-x86-64.so.2 /lib/ld-linux-aarch64.so.1 /lib/ld-linux.so.2; do
+  [ -e "$ld" ] && copy_one "$ld"
+done
+
+rm -f "$seen"
+exit 0
