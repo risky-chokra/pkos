@@ -25,13 +25,13 @@ busybox-static + squashfs (read-only /) + overlayfs (upper = RAM / PK-PERSIST pa
 | cheez | status |
 |---|---|
 | `make doctor` | sab ready (0 missing) |
-| `make iso` | `build/pkos.iso` = **87 629 824 bytes (84 MiB)** |
+| `make iso` | `build/pkos.iso` = **87 633 920 bytes (84 MiB)** (delivered `pkos-1.0.iso` isi size ka) |
 | `make test` (QEMU, **8 stages**) | **QA PASS 62 checks ok**, rc=0 |
 | `make gui-test` (stage 8 + desktop) | **QA PASS 19 checks ok** — GUI bhi asli verify |
 | `make apps-iso` | `build/pkos-apps.iso` = **700 MiB** (App Runtime + apt + Wine + weston/Xvfb andar) |
 | `make iso REPRODUCIBLE=1` | do alag builds ke `/live/pk.sqfs` + `/boot/pk-initrd` **sha256 same** ✓ |
 | git | **3 commits** (sandbox reset ke baad dobara init), **78 files tracked**, tree clean |
-| aapke liye files | `/home/user/pkos-1.0.iso`, `pkos-1.0-apps.iso`, `pkos-1.0*.manifest.txt`, `pkos-1.0.bundle`, `pkos-1.0-src.tar.gz`, `pkos-1.0.iso.sha256` — sab `sha256sum -c` se **OK** |
+| aapke liye files | `/home/user/pkos-1.0.iso` (87 633 920 B, sha256 `f1b5c1f3…`) ✓ persist + verified, `pkos-1.0-manifest.txt` + `pkos-1.0-apps-manifest.txt`, `pkos-1.0-src.tar.gz`, `pkos-1.0.bundle`, `pkos-1.0.iso.sha256` (4 entries, `sha256sum -c` OK). **`pkos-1.0-apps.iso` (700 MiB) size cap se persist nahi hota** -> `sudo make runtime-desktop && make apps-iso` se 6-8 min me dobara |
 | is round me naya | `pk-check`, `pk-desktop`, `pk-keymap`, `pk-wifi`, `pk-ios`, `pk-android`, `tools/verify-usb.sh`, `scripts/manifest.sh`, `tools/restore-from-iso.sh`, QA **stage 8**, `docs/PENDRIVE.md`, `docs/IOS-ANDROID.md` |
 
 ### QA stages (sab pass)
@@ -46,6 +46,16 @@ busybox-static + squashfs (read-only /) + overlayfs (upper = RAM / PK-PERSIST pa
 | 6 persistence + net + ssh | `PERSIST-WROTE`/`PERSIST-KEPT`, `upperdir=/mnt/persist/…`, `NET-OK (ip)`, `SSH-OK` |
 | 7 app runtime | runtime attach, `pk-run` battery (ELF/script/.deb/.exe/.apk/Mach-O/**.ipa**/AppImage/jar/rpm), chroot exec, doosri boot par re-attach, host se rw-img verify — **14 checks** |
 | 8 pendrive kit | kit ISO (runtime andar) → `pk-check` **0 FAIL**, `pk-keymap`, headless install with `--user` + runtime copy (`/var/lib/pk`), installed boot par **`mode=rw-image`** persistence — **15 checks**; `PK_TEST_GUI=1` se +4: `DESKTOP-OK`, `GUI-X-OK`, `GUI-APP-OK` (xterm), `GUI-XCLIENT-OK` (xdpyinfo) |
+
+## 2b. Reset ke baad restore (aapke PC pe bhi wahi 2 command)
+
+```sh
+git clone pkos-1.0.bundle pkos        # poora repo + history (78 files)
+cd pkos && make doctor && make iso    # toolchain chahiye: apt list docs/BUILD.md me
+sudo make runtime-desktop && make apps-iso   # 700 MiB wala apps+GUI ISO dobara
+```
+Sandbox me bade files (700 MB ISO, `build/`) persist nahi hote — chhote (src tar,
+bundle, manifests, base ISO) persist hote hain, isliye wahi backup hain.
 
 ## 3. Is round me jo bug pakde aur fix kiye
 
