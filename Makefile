@@ -39,7 +39,7 @@ export SUDO QEMU PK_KERNEL PK_MODULES PK_BUSYBOX SQUASH_COMP KERNEL_CMDLINE PK_Q
 
 SRC := $(shell find $(PK_ROOT)/rootfs $(PK_ROOT)/scripts $(PK_ROOT)/init $(PK_ROOT)/config -type f 2>/dev/null | tr '\n' ' ')
 
-.PHONY: all help doctor live squash initrd iso runtime runtime-desktop apps-iso manifest verify check gui-test bundle run run-tty run-iso run-efi test test-live test-apps usb kernel clean clean-rootfs clean-runtime deepclean rootfs
+.PHONY: all help doctor live squash initrd iso runtime runtime-desktop apps-iso manifest manifest-apps kit verify check gui-test bundle run run-tty run-iso run-efi test test-live test-apps usb kernel clean clean-rootfs clean-runtime deepclean rootfs
 
 all: iso
 
@@ -106,6 +106,11 @@ apps-iso: iso
 	@echo "[pk] apps ISO: $(BUILD)/pkos-apps.iso"
 manifest: iso
 	@scripts/manifest.sh $(ISO) $(BUILD)/manifest.txt
+manifest-apps: apps-iso
+	@scripts/manifest.sh $(BUILD)/pkos-apps.iso $(BUILD)/manifest-apps.txt
+kit: iso apps-iso manifest manifest-apps bundle
+	@echo "[pk] kit ready: build/pkos.iso build/pkos-apps.iso build/manifest*.txt build/pkos-main.bundle"
+	@echo "[pk] pendrive: tools/write-usb.sh  ya  dd  (docs/PENDRIVE.md)"
 verify: manifest
 	@tools/verify-usb.sh --iso $(ISO) $(BUILD)/manifest.txt
 check: iso
