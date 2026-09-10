@@ -80,6 +80,9 @@ Pass ka matlab (serial/console par ye lines aani chahiye):
 
 ```
 ### PK: BOOT-OK mode=live ...
+### PK: MDEV-OK (hotplug=/bin/mdev) ###        # plug & play driver loading on
+### PK: VERIFY-OK (pk.sqfs) ###                 # payload integrity (pk_verify=1 wale boot par)
+### PK: TUNE-REPORT-OK ###  BINFMT-STATUS-OK  ARCH-DISPATCH-OK
 ### PK: DEPS-OK ###
 ### PK: NET-OK (192.168.x.x) ###          # agar pk_net=dhcp diya
 ### PK: RUNTIME-OK src=... mode=rw-image ...   # runtime laga ho

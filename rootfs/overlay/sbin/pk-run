@@ -5,6 +5,7 @@
 #   pk-run --info <file>             sirf type batao
 #   pk-run --list                    installed launchers
 #   pk-run --gui <app>               display server (pk-x) ke saath chalao
+#   pk-run --sandbox <app>           namespaces (user/pid/mnt/net) + /root /home chhupe
 #   pk-run --selftest [samplesdir]   QA: dispatch battery + ### PK: APPS-* ### markers
 #   pk-run --uninstall <name>        apps dir se hatao (+ runtime ka dpkg package bhi)
 #   pk-run --which <name>            resolve karke path batao
@@ -131,9 +132,82 @@ unpack_ar() { # <archive> <outdir>
 }
 
 # ------------------------------------------------------------------ runners
+elf_machine() { # <file> -> e_machine (LE 16-bit at offset 18)
+  em=$(od -An -tx1 -j18 -N2 "$1" 2>/dev/null | tr -d ' \n')
+  case "$em" in
+    3e00) printf 'x86_64\n' ;;
+    0300) printf 'i386\n' ;;
+    b700) printf 'aarch64\n' ;;
+    2800) printf 'arm\n' ;;
+    f300) printf 'riscv64\n' ;;
+    1500) printf 'ppc64le\n' ;;
+    1600) printf 's390x\n' ;;
+    0800) printf 'mips\n' ;;
+    *)    printf 'other:%s\n' "${em:-?}" ;;
+  esac
+}
+binfmt_has() { # <arch>
+  [ -e "/proc/sys/fs/binfmt_misc/pk-$1" ] || [ -e "/proc/sys/fs/binfmt_misc/qemu-$1" ]
+}
+run_foreign() { # <arch> <file> [args...]
+  a=$1; f=$2; shift 2
+  if binfmt_has "$a"; then
+    say "arch: $a (binfmt handler se -> kernel khud qemu use karega)"
+    "$f" "$@"
+    return $?
+  fi
+  runtime_ok || { warn "$a binary hai par App Runtime attached nahi (qemu-user wahi me hota hai)"; warn "  pk-runtime start  ;  phir: pk-get install -y qemu-user-static"; mark "APP-ARCH-DIAG (no runtime)"; return 66; }
+  emu=''
+  for c in "qemu-$a" "qemu-$a-static"; do
+    if [ -x "$RT/usr/bin/$c" ] || [ -e "$RT/usr/bin/$c" ] || [ -L "$RT/usr/bin/$c" ]; then emu=$c; break; fi
+  done
+  if [ -z "$emu" ]; then
+    warn "ye $a (foreign arch) Linux binary hai - chalane ke liye qemu-user chahiye:"
+    warn "  pk-get install -y qemu-user-static   &&   pk-binfmt register"
+    warn "  (tab tak: pk-run $f --self-check wala rasta bhi hai)"
+    mark "APP-ARCH-DIAG ($a, no qemu-user)"
+    return 69
+  fi
+  say "arch: $a -> $emu (App Runtime ke andar) se chal raha hai"
+  ip=$(stage_for_chroot "$f") || { warn "runtime me copy fail"; return 66; }
+  pk-chroot "/usr/bin/$emu" "$ip" "$@"
+  rc=$?
+  [ "$rc" = 0 ] && mark "APP-ARCH-OK ($a via $emu)"
+  return $rc
+}
+sandboxable() {
+  have unshare || return 1
+  unshare -r -u -i -p --fork /bin/true >/dev/null 2>&1 || return 1
+  return 0
+}
+run_sandboxed() { # <file> [args...]  -- user/pid/mount/net namespaces + user dirs hide
+  f=$1; shift
+  if ! sandboxable; then
+    warn "sandbox available nahi (kernel me user namespaces / busybox unshare chahiye)"
+    warn "  bina sandbox ke chala rahe hain - 'pk-check' me dekho"
+    mark "APP-SANDBOX-UNAVAIL"
+    "$f" "$@"; return $?
+  fi
+  # net ns (-n) se app ko network nahi dikhta; tmpfs se /root /home /mnt/persist chhupe
+  unshare -r -m -u -i -n -p -f --mount-proc /bin/sh -c '
+    for d in /root /home /mnt/persist /run/pk; do
+      [ -d "$d" ] && mount -t tmpfs -o size=1M tmpfs "$d" 2>/dev/null
+    done
+    mount -o remount,ro / 2>/dev/null
+    exec "$@"
+  ' pk-sb "$f" "$@"
+}
+
 run_elf() { # <file> [args...]
   f=$1; shift
   chmod +x "$f" 2>/dev/null
+  a=$(elf_machine "$f")
+  case "$a" in
+    x86_64|i386) : ;;
+    other*) say "ELF machine: $a (unknown - direct try karenge)" ;;
+    *) run_foreign "$a" "$f" "$@"; return $? ;;
+  esac
+  if [ "${SANDBOX:-0}" = 1 ]; then run_sandboxed "$f" "$@"; return $?; fi
   if "$f" "$@" 2>/tmp/pk-run.err; then return 0; fi
   rc=$?
   if ! grep -qiE 'not found|error while loading shared libraries' /tmp/pk-run.err 2>/dev/null; then
@@ -504,6 +578,28 @@ selftest() {
     *"pk-get install -y rpm"*|*alien*|*"rpm -Uvh"*) mark "APP-RPM-DIAG-OK" ;;
     *) mark "APP-RPM-PARTIAL ${out:-<khaali>}" ;;
   esac
+  # 8b) foreign-arch Linux binary (arm64) -> qemu-user / binfmt
+  printf '\177ELF\002\001\001\000\000\000\000\000\000\000\000\000\002\000\267\000' > "$tmp/st.arm64"
+  chmod +x "$tmp/st.arm64"
+  out=$(pk-run "$tmp/st.arm64" 2>&1 | tr '\n' '|' | cut -c1-120 || true)
+  case "$out" in
+    *QEMU-USER-RAN*|*"arch: aarch64"*) mark "APP-ARCH-OK ($out)" ;;
+    *) mark "APP-ARCH-PARTIAL ${out:-<khaali>}" ;;
+  esac
+  # 8c) sandbox: /root ka content app se chhupna chahiye
+  mkdir -p /root 2>/dev/null
+  secret=/root/pk-sb-secret-$$.txt
+  echo hidden > "$secret" 2>/dev/null
+  if sandboxable; then
+    out=$(pk-run --sandbox /bin/sh -c 'ls /root 2>/dev/null; echo RC=$?' 2>&1 | tr '\n' '|' | cut -c1-120)
+    case "$out" in
+      *pk-sb-secret*) mark "APP-SANDBOX-FAIL (user dir dikh gaya: $out)"; fails=$((fails + 1)) ;;
+      *) mark "APP-SANDBOX-OK (/root hidden, net+pid ns on)" ;;
+    esac
+  else
+    mark "APP-SANDBOX-SKIP (unshare/user-ns nahi chala: $out)"
+  fi
+  rm -f "$secret" 2>/dev/null
   # 9) runtime ke andar exec
   if runtime_ok; then
     if [ -x "$RT/usr/bin/pk-tiny-app" ]; then
@@ -548,9 +644,12 @@ case "${1:-}" in
   --help|-h)  sed -n '2,16p' "$0"; exit 0 ;;
 esac
 GUI=0
+SANDBOX=0
+if [ "${1:-}" = --sandbox ]; then SANDBOX=1; shift; fi
 if [ "${1:-}" = --gui ]; then GUI=1; shift; fi
+if [ "${1:-}" = --sandbox ]; then SANDBOX=1; shift; fi
 app=${1:-}
-[ -n "$app" ] || { echo "usage: pk-run [--info|--install|--list|--gui|--selftest] <app> [args...]"; exit 1; }
+[ -n "$app" ] || { echo "usage: pk-run [--info|--install|--list|--gui|--sandbox|--selftest] <app> [args...]"; exit 1; }
 shift
 if [ ! -f "$app" ]; then
   case "$app" in

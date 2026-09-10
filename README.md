@@ -136,6 +136,12 @@ pk-check --save # HARDWARE + OS self-test (net, USB speed, disks, DRM, KVM, Secu
 pk-desktop      # GUI session (weston -> Xvfb fallback) + terminal ; pk-desktop app htop
 pk-run ./app    # koi bhi app: ELF, script, .deb, AppImage, .jar, .exe/.msi (Wine), .ipa
 pk-run --selftest        # app dispatch battery (### PK: APPS-OK ###)
+pk-run --sandbox ./app   # app ko namespaces me (user/pid/mnt/net) + /root /home chhupe
+pk-tune report           # CPU governor+EPP, sched, IO scheduler, IPC, security, TPM (read-only)
+pk-tune desktop          # desktop profile: cgroups (apps 200/bg 20), mq-deadline, BBR/fq, THP
+pk-tune hybrid           # P/E core detect -> daemons efficiency cores par (cpu_capacity se)
+pk-binfmt register       # arm64/arm/riscv64/ppc64le ELF -> qemu-user se direct (runtime me qemu-user-static)
+pk-desktop outputs       # connected displays + modes ; pk-desktop scale 2 [OUT] (HiDPI, no reboot)
 pk-ios why               # iOS apps ka sach + raaste (web wrapper / macOS guest / Darling)
 pk-android doctor        # .apk ke liye kya missing hai (binderfs/waydroid)
 pk-keymap in             # keyboard layout (console + GUI)
@@ -182,6 +188,9 @@ pk_media=/dev/sdb pk_install=auto pk_silent pk_halt pk_rootpw=MeraPass
 - `pk_check=1` → install ke baad bhi `pk-check` ki report (`/run/pk/check.txt`) disk par
   copy karne ki zaroorat nahi padti; live me hi sab record ho jaata hai
 - `pk_wifi=<ssid>:<pw>` → Wi-Fi se connect (experimental, runtime me wpasupplicant)
+- `pk_verify=1|require` → boot par `/live/pk.sqfs` ka sha256 sidecar se verify (payload integrity)
+- `pk_tune=report|desktop|hybrid` → S60tune hook (CPU/IO/IPC/cgroup tuning; `PK_TUNE=` se default)
+- `pk_mdev=off` → busybox mdev hotplug hook band (default on: plug-and-play modprobe)
 - Baad me bhi: `pk-net dhcp` / `pk-net status` / `pk-ssh start`
 
 Installed system me `pk-install` `/etc/default/pk` ka `PK_DHCP=yes` kar deta
@@ -295,6 +304,7 @@ Boot options (GRUB me `e`, ya menu entries `g`/`k`): `pk_check=1` (ya `pk_check=
 |---|---|
 | [docs/PENDRIVE.md](docs/PENDRIVE.md) | **aapke real pendrive test ka sheet** (kya karna hai, kaunsi line pass mani jaayegi, kya bhejna hai) |
 | [docs/IOS-ANDROID.md](docs/IOS-ANDROID.md) | iOS/Android: kya chalta hai, kyun nahi chalta, kaunse raaste actually kaam karte hain |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | modern desktop-OS requirements (scheduling/GPU/memory/security/IPC) — is OS me kaun karta hai, kaise verify karein, kya possible nahi |
 | [docs/APPS.md](docs/APPS.md) | App Runtime (Debian userland + apt + Wine) |
 | [docs/TROUBLE.md](docs/TROUBLE.md) | markers se debugging |
 

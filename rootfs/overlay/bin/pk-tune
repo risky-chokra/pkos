@@ -1,0 +1,346 @@
+#!/bin/sh
+# pk's OS :: scheduler / CPU / IO / network / IPC tuning + P-E core awareness
+#   pk-tune report              abhi kya chal raha hai (read-only)
+#   pk-tune desktop             desktop profile: governor+EPP, IO scheduler, sysctls, cgroups
+#   pk-tune hybrid              Intel P/E (ya ARM big.LITTLE) detect karke daemons ko
+#                               efficiency cores par daalo, foreground ko performance par
+#   pk-tune fg <pid|name>       use process ko foreground weight do (cgroup + nice)
+#   pk-tune bg <pid|name>       background: low weight, idle nice
+#   pk-tune io [mq-deadline|bfq|kyber|none]   disk scheduler
+#   pk-tune net                 rmem/wmem + qdisc + offloads (jo ethtool de)
+#   pk-tune ipc                 /dev/shm size, mqueue, io_uring status
+#   pk-tune swap [MB]           swapfile banao/chalao (demand paging ke liye; 0 = off)
+#   pk-tune undo                desktop/hybrid ke changes wapas defaults par
+#
+# Sab kuch sysfs/procfs/cgroup se karta hai - naye daemons nahi, kernel hi karta hai.
+# Jo cheez machine pe nahi (EPP, bfq, cpuset) wo warn karke skip karti hai.
+set -u
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+CG=/sys/fs/cgroup
+W=$CG/pk.slice
+RT=${PK_RUNTIME_ROOT:-/opt/pk}
+have() { command -v "$1" >/dev/null 2>&1; }
+say()  { printf 'pk-tune: %s\n' "$*"; }
+warn() { printf 'pk-tune: %s\n' "$*" >&2; }
+mark() { ( printf '### PK: %s ###\n' "$*" > /dev/console ) 2>/dev/null; ( printf '%s\n' "$*" > /dev/kmsg ) 2>/dev/null; }
+wrote=0
+w()    { # <path> <value>  (silently skip agar read-only/na ho)
+  [ -e "$1" ] || return 1
+  { printf '%s\n' "$2" > "$1"; } 2>/dev/null || return 1
+  wrote=$((wrote + 1))
+  return 0
+}
+rd()   { cat "$1" 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g'; }
+rootblk() { awk '$2=="/"{print $1; exit}' /proc/mounts 2>/dev/null | sed 's/[0-9]*$//;s/p$//;s|.*/||'; }
+
+# ---------------------------------------------------------------- cgroups v2 helper
+cg_ready=0
+cg_setup() {
+  if ! mountpoint_ok "$CG" || [ ! -f "$CG/cgroup.controllers" ]; then
+    mount -t cgroup2 none "$CG" 2>/dev/null || true
+  fi
+  if [ -f "$CG/cgroup.controllers" ]; then
+    for c in cpu io memory pids cpuset; do
+      grep -qw "$c" "$CG/cgroup.controllers" 2>/dev/null && w "$CG/cgroup.subtree_control" "+$c" || true
+    done
+    mkdir -p "$W/apps" "$W/bg" "$W/sandbox" 2>/dev/null || true
+    if [ -d "$W" ]; then
+      cg_ready=1
+      w "$W/apps/cpu.weight" 200 || true      # foreground (default 100)
+      w "$W/bg/cpu.weight" 20  || true        # background daemons
+      w "$W/sandbox/cpu.weight" 50 || true
+      return 0
+    fi
+  fi
+  warn "cgroup v2 nahi mila (cpu.weight/priority grouping skip)"
+  return 1
+}
+mountpoint_ok() { grep -q " $1 " /proc/mounts 2>/dev/null; }
+cg_move() { # <slice> <pid>
+  [ "$cg_ready" = 1 ] || return 1
+  d=$W/$1
+  [ -d "$d" ] || return 1
+  w "$d/cgroup.procs" "$2"
+}
+pid_of() { # <name> -> pids
+  p=$1
+  case "$p" in
+    ''|*[!0-9]*) ;;                       # naam hai
+    *) printf '%s\n' "$p"; return 0 ;;    # pid diya
+  esac
+  if have pgrep; then pgrep -x "$p" 2>/dev/null; else
+    for d in /proc/[0-9]*; do
+      c=$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null)
+      case "$c" in "$p"*|*/"$p"*) printf '%s\n' "${d##*/}" ;; esac
+    done
+  fi
+}
+
+# ---------------------------------------------------------------- P/E core detection
+cap_of() { # <cpu n> -> capacity (0-1024) ya ''
+  for p in "/sys/devices/system/cpu/cpu$1/cpu_capacity" "/sys/devices/system/cpu/cpu$1/topology/cpu_capacity"; do
+    [ -r "$p" ] && { cat "$p" 2>/dev/null; return 0; }
+  done
+  printf '\n'
+}
+hybrid_info() {
+  n=0; big=''; lit=''; caps=''
+  while [ $n -lt 64 ]; do
+    [ -d "/sys/devices/system/cpu/cpu$n" ] || break
+    c=$(cap_of $n)
+    if [ -n "$c" ]; then
+      caps="$caps $n:$c"
+      if [ "$c" -ge 900 ] 2>/dev/null; then big="$big $n"; elif [ "$c" -le 700 ] 2>/dev/null; then lit="$lit $n"; fi
+    fi
+    n=$((n + 1))
+  done
+  ncpu=$(grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 1)
+  if [ -n "$big" ] && [ -n "$lit" ]; then
+    printf 'hybrid\n%s\n%s\n%s\n' "$ncpu" "$big" "$lit"
+  else
+    printf 'uniform\n%s\n%s\n\n' "$ncpu" "${big:-all}"
+  fi
+}
+cpulist() { printf '%s' "$1" | tr ' ' ',' | sed 's/^,//;s/,$//;s/,,//g'; }
+
+# ---------------------------------------------------------------- report
+report() {
+  printf 'pk-tune report\n'
+  printf '  cpu        : %s threads, model=%s\n' "$(grep -c ^processor /proc/cpuinfo 2>/dev/null)" "$(sed -n 's/^model name[ ]*:[ ]*//p' /proc/cpuinfo 2>/dev/null | head -1 | cut -c1-52)"
+  hi=$(hybrid_info)
+  kind=$(printf '%s\n' "$hi" | sed -n '1p'); ncpu=$(printf '%s\n' "$hi" | sed -n '2p')
+  bigl=$(printf '%s\n' "$hi" | sed -n '3p'); litl=$(printf '%s\n' "$hi" | sed -n '4p')
+  if [ "$kind" = hybrid ]; then
+    printf '  topology   : P/E (heterogeneous) -> big:%s  little:%s\n' "$bigl" "$litl"
+  else
+    printf '  topology   : uniform (%s cpus; cpu_capacity nahi mila to P/E detect skip)\n' "$ncpu"
+  fi
+  g=$(rd /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor); [ -n "$g" ] || g='(cpufreq sysfs nahi)'
+  e=$(rd /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference); [ -n "$e" ] || e='(EPP nahi)'
+  printf '  governor   : %s   EPP: %s\n' "$g" "$e"
+  printf '  sched      : migration_cost=%s ns  min_granularity=%s us\n' \
+    "$(rd /sys/kernel/debug/sched/migration_cost_ns || rd /proc/sys/kernel/sched_migration_cost_ns)" \
+    "$(rd /sys/kernel/debug/sched/min_granularity_ns || echo '-')"
+  printf '  preempt    : %s\n' "$(rd /sys/kernel/debug/sched/preempt || echo '(debugfs nahi - kernel default)')"
+  rootdev=$(awk '$2=="/"{print $1; exit}' /proc/mounts 2>/dev/null); rootdev=${rootdev:-/dev/unknown}
+  base=$(printf '%s' "$rootdev" | sed 's/[0-9]*$//;s/p$//')
+  bname=${base##*/}
+  sch=$(rd "/sys/block/$bname/queue/scheduler" 2>/dev/null)
+  printf '  io         : %s -> scheduler: %s\n' "$rootdev" "${sch:-(none)}"
+  printf '  rq          : read_ahead=%s KB, nr_requests=%s, rotational=%s, dma=%s\n' \
+    "$(rd /sys/block/$bname/queue/read_ahead_kb)" "$(rd /sys/block/$bname/queue/nr_requests)" \
+    "$(rd /sys/block/$bname/queue/rotational)" "$(rd /sys/block/$bname/queue/max_sectors_kb)"
+  printf '  memory     : THP=%s swappiness=%s dirty_ratio=%s/%s\n' \
+    "$(rd /sys/kernel/mm/transparent_hugepage/enabled | sed 's/.*\[\(.*\)\].*/\1/')" \
+    "$(rd /proc/sys/vm/swappiness)" "$(rd /proc/sys/vm/dirty_ratio)" "$(rd /proc/sys/vm/dirty_background_ratio)"
+  printf '  ipc         : io_uring_disabled=%s shm=%s mqueue=%s unix=%s\n' \
+    "$(rd /proc/sys/kernel/io_uring_disabled || echo '-')" \
+    "$(grep -c /dev/shm /proc/mounts 2>/dev/null)" \
+    "$(grep -c mqueue /proc/mounts 2>/dev/null)" \
+    "$(grep -c . /proc/net/unix 2>/dev/null) unix-sockets"
+  printf '  security   : aslr=%s ptrace=%s lockdown=%s mitigations_off=%s\n' \
+    "$(rd /proc/sys/kernel/randomize_va_space)" "$(rd /proc/sys/kernel/yama/ptrace_scope)" \
+    "$(rd /sys/kernel/security/lockdown | sed 's/.*\[\(.*\)\].*/\1/')" \
+    "$(grep -l 'Vulnerable' /sys/devices/system/cpu/vulnerabilities/* 2>/dev/null | wc -l)/$(ls /sys/devices/system/cpu/vulnerabilities 2>/dev/null | wc -l) vulnerable"
+  tp=''
+  for t in /dev/tpm0 /dev/tpmrm0; do [ -e "$t" ] && tp="$tp $t"; done
+  printf '  tpm         : %s\n' "${tp:- '(no TPM device - measured boot/VBS ke liye chahiye)'}"
+  printf '  hotplug     : %s\n' "$(rd /proc/sys/kernel/hotplug || echo '(none)')"
+  printf '  swap        : %s MB total\n' "$(( $(awk '/^SwapTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 0) / 1024 ))"
+  printf '  cgroup      : %s  (weights: apps=200 bg=20)\n' "$( [ -f $CG/cgroup.controllers ] && echo 'v2 ready' || echo 'none/read-only')"
+  printf '  sandbox     : unshare=%s namespaces=%s\n' "$(have unshare && echo yes || echo no)" \
+    "$(ls /proc/1/ns 2>/dev/null | tr '\n' ' ')"
+  if [ -d "$RT/usr" ]; then
+    printf '  runtime     : attached (%s)\n' "$RT"
+  else
+    printf '  runtime     : nahi laga (GUI/apt tools wahi se aate hain)\n'
+  fi
+  mark "TUNE-REPORT-OK"
+  return 0
+}
+
+desktop() {
+  cg_setup || true
+  n=0
+  while [ $n -lt 64 ]; do
+    [ -d "/sys/devices/system/cpu/cpu$n/cpufreq" ] || break
+    w "/sys/devices/system/cpu/cpu$n/cpufreq/scaling_governor" powersave || true
+    w "/sys/devices/system/cpu/cpu$n/cpufreq/energy_performance_preference" balance_performance || \
+      w "/sys/devices/system/cpu/cpu$n/cpufreq/energy_performance_preference" normal || true
+    n=$((n + 1))
+  done
+  [ $n = 0 ] && warn "cpufreq sysfs nahi mila (governor skip)"
+  rb=$(rootblk)
+  if [ -n "$rb" ]; then
+    for q in mq-deadline bfq kyber none; do
+      w "/sys/block/$rb/queue/scheduler" "$q" && break
+    done
+  fi
+  w /proc/sys/vm/swappiness 10 || true
+  w /proc/sys/vm/dirty_ratio 8 || true
+  w /proc/sys/vm/dirty_background_ratio 3 || true
+  w /proc/sys/vm/vfs_cache_pressure 50 || true
+  w /sys/kernel/mm/transparent_hugepage/enabled madvise || true
+  w /proc/sys/kernel/sched_autogroup_enabled 1 || true
+  net_tune
+  if [ "$wrote" = 0 ]; then
+    warn "kuch bhi likhne ko na mila (sysfs read-only / container?) - report dekho: pk-tune report"
+    mark "TUNE-DESKTOP-NONE"
+    return 1
+  fi
+  say "desktop profile set ($wrote knob likhe: governor+EPP, IO scheduler, dirty_ratio, autogroup, cgroups apps=200/bg=20)"
+  mark "TUNE-DESKTOP-OK"
+  return 0
+}
+
+undo() {
+  n=0
+  while [ $n -lt 64 ]; do
+    [ -d "/sys/devices/system/cpu/cpu$n/cpufreq" ] || break
+    w "/sys/devices/system/cpu/cpu$n/cpufreq/scaling_governor" schedutil || true
+    w "/sys/devices/system/cpu/cpu$n/cpufreq/energy_performance_preference" balance_power || true
+    n=$((n + 1))
+  done
+  w /proc/sys/vm/swappiness 60 || true
+  w /proc/sys/kernel/sched_autogroup_enabled 0 || true
+  for d in "$W/apps" "$W/bg" "$W/sandbox"; do rmdir "$d" 2>/dev/null; done
+  say "defaults par wapas (jo likha jaaki)"
+  mark "TUNE-UNDO-OK"
+}
+
+hybrid() {
+  cg_setup || return 1
+  hi=$(hybrid_info)
+  kind=$(printf '%s\n' "$hi" | sed -n '1p')
+  if [ "$kind" != hybrid ]; then
+    say "uniform topology (P/E signal nahi) -> cpuset split ki zaroorat nahi"
+    mark "TUNE-HYBRID-UNIFORM"
+    return 0
+  fi
+  bigl=$(printf '%s\n' "$hi" | sed -n '3p'); litl=$(printf '%s\n' "$hi" | sed -n '4p')
+  lb=$(cpulist "$bigl"); ll=$(cpulist "$litl")
+  w "$W/apps/cpuset.cpus" "$lb" || warn "apps cpuset set nahi hua"
+  w "$W/bg/cpuset.cpus" "$ll" || warn "bg cpuset set nahi hua"
+  w "$W/sandbox/cpuset.cpus" "$ll" || true
+  moved=0
+  for d in dropbear udhcpc crond acpid; do
+    for p in $(pid_of "$d"); do cg_move bg "$p" && moved=$((moved + 1)); done
+  done
+  say "big cores [$lb] = apps slice, little [$ll] = daemons ($moved move kiye)"
+  mark "TUNE-HYBRID-OK (big=$lb little=$ll moved=$moved)"
+  return 0
+}
+
+fg() {
+  t=${1:-}; [ -n "$t" ] || { echo "usage: pk-tune fg <pid|name>"; return 1; }
+  cg_setup || true
+  n=0
+  for p in $(pid_of "$t"); do
+    cg_move apps "$p" && n=$((n + 1))
+    renice -n -5 -p "$p" 2>/dev/null || true
+  done
+  if [ "$n" = 0 ]; then warn "koi pid nahi mila: $t"; return 1; fi
+  say "$n pid(s) foreground slice (cpu.weight 200, nice -5)"
+  mark "TUNE-FG-OK ($t, $n)"
+}
+bg() {
+  t=${1:-}; [ -n "$t" ] || { echo "usage: pk-tune bg <pid|name>"; return 1; }
+  cg_setup || true
+  n=0
+  for p in $(pid_of "$t"); do
+    cg_move bg "$p" && n=$((n + 1))
+    renice -n 10 -p "$p" 2>/dev/null || true
+  done
+  [ "$n" = 0 ] && { warn "koi pid nahi mila: $t"; return 1; }
+  say "$n pid(s) background slice (cpu.weight 20, nice 10, io weight low)"
+  w "$W/bg/io.bfq.weight" 10 2>/dev/null || true
+  mark "TUNE-BG-OK ($t, $n)"
+}
+
+io_tune() {
+  q=${1:-}
+  b=$(rootblk)
+  [ -n "$b" ] || { warn "root block dev nahi mila"; return 1; }
+  if [ -z "$q" ]; then rd "/sys/block/$b/queue/scheduler"; return 0; fi
+  if w "/sys/block/$b/queue/scheduler" "$q"; then
+    w "/sys/block/$b/queue/read_ahead_kb" 256 || true
+    say "$b: scheduler=$q ($(rd "/sys/block/$b/queue/scheduler"))"
+    mark "TUNE-IO-OK ($q)"
+  else
+    warn "$q available nahi ($(rd "/sys/block/$b/queue/scheduler"))"; return 1
+  fi
+}
+
+net_tune() {
+  w /proc/sys/net/core/rmem_max 16777216 || true
+  w /proc/sys/net/core/wmem_max 16777216 || true
+  w /proc/sys/net/ipv4/tcp_rmem "4096 131072 16777216" || true
+  w /proc/sys/net/ipv4/tcp_wmem "4096 131072 16777216" || true
+  w /proc/sys/net/ipv4/tcp_congestion_control bbr || w /proc/sys/net/ipv4/tcp_congestion_control cubic || true
+  w /proc/sys/net/core/default_qdisc fq || true
+  w /proc/sys/net/ipv4/tcp_fastopen 3 || true
+  say "net: rmem/wmem 16 MiB, qdisc=$(rd /proc/sys/net/core/default_qdisc), cc=$(rd /proc/sys/net/ipv4/tcp_congestion_control)"
+  mark "TUNE-NET-OK"
+  for n in /sys/class/net/*; do
+    [ "$(basename "$n")" = lo ] && continue
+    w "$n/mtu" 9000 2>/dev/null || true      # jumbo (switch support ho to)
+  done
+}
+
+swap_tune() {
+  mb=${1:-1024}
+  cur=$(awk '/^SwapTotal/{print $2}' /proc/meminfo 2>/dev/null)
+  if [ "${mb:-0}" = 0 ]; then swapoff -a 2>/dev/null; say "swap off"; mark "TUNE-SWAP-OFF"; return 0; fi
+  if [ "${cur:-0}" -gt 0 ]; then say "pehle se swap hai ($((${cur}/1024)) MB)"; return 0; fi
+  for d in /var/tmp /var /mnt/persist /root; do
+    [ -d "$d" ] || continue
+    case "$d" in /*) : ;; esac
+    f=$d/pk-swapfile
+    [ -w "$(dirname "$f")" ] || continue
+    printf '  try %s (%s MB) ...\n' "$f" "$mb"
+    # swapfile me holes nahi hone chahiye -> poora likhte hain (mkswap/swapon iske baad chalte hain)
+    dd if=/dev/zero of="$f" bs=1M count="$mb" 2>/dev/null || { rm -f "$f"; continue; }
+    chmod 600 "$f" 2>/dev/null
+    mkswap "$f" >/dev/null 2>&1 || { rm -f "$f"; continue; }
+    swapon "$f" 2>/dev/null && { say "swap on: $f (${mb} MB)"; mark "TUNE-SWAP-OK (${mb}M)"; return 0; }
+    rm -f "$f" 2>/dev/null
+  done
+  warn "koi swapfile banane layak jagah nahi (live RAM me fstab 'none swap'? installed system me kaam karega)"
+  mark "TUNE-SWAP-SKIP"
+  return 1
+}
+
+ipc_tune() {
+  if ! mountpoint_ok /dev/shm; then
+    mount -t tmpfs -o size=50%,nosuid,nodev tmpfs /dev/shm 2>/dev/null && say "/dev/shm mount kiya (shared memory)"
+  else
+    say "/dev/shm already mounted ($(awk '$2==\"/dev/shm\"{print $3, $4}' /proc/mounts 2>/dev/null | head -1))"
+  fi
+  mkdir -p /mnt/mqueue 2>/dev/null
+  mounted_mq=$(awk '$3=="mqueue"{print $2; exit}' /proc/mounts 2>/dev/null)
+  if [ -z "$mounted_mq" ]; then mount -t mqueue none /mnt/mqueue 2>/dev/null && mounted_mq=/mnt/mqueue; fi
+  [ -n "$mounted_mq" ] && say "mqueue mounted: $mounted_mq" || warn "mqueue mount nahi hua (POSIX queues skip)"
+  [ -d /proc/sys/fs/mqueue ] && say "mqueue msgmax=$(rd /proc/sys/fs/mqueue/msg_max)"
+  if [ -f /proc/sys/kernel/io_uring_disabled ]; then
+    say "io_uring: disabled=$(rd /proc/sys/kernel/io_uring_disabled)"
+  else
+    say "io_uring: kernel me support (sysctl nahi, matlab enabled)"
+  fi
+  w /proc/sys/kernel/io_uring_disabled 0 || true
+  mark "TUNE-IPC-OK"
+}
+
+case "${1:-report}" in
+  report|"") shift 2>/dev/null || true; report ;;
+  desktop)  desktop ;;
+  hybrid)   hybrid ;;
+  undo)     undo ;;
+  fg)       shift; fg "$1" ;;
+  bg)       shift; bg "$1" ;;
+  io)       shift; io_tune "${1:-}" ;;
+  net)      net_tune ;;
+  ipc)      ipc_tune ;;
+  swap)     shift; swap_tune "${1:-1024}" ;;
+  --help|-h) sed -n '2,15p' "$0" ;;
+  *) warn "unknown: $1"; exit 1 ;;
+esac

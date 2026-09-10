@@ -57,3 +57,8 @@ kernel/drivers/net/wireless/intel/iwlwifi
 kernel/drivers/net/wireless/ath
 kernel/net/ipv4
 kernel/net/ipv6
+# tuning / foreign-arch execution ke liye (pk-tune, pk-binfmt)
+kernel/fs/binfmt_misc.ko*
+kernel/drivers/cpufreq
+kernel/drivers/cpuidle
+kernel/drivers/thermal

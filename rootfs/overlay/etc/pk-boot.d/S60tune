@@ -1,0 +1,48 @@
+#!/bin/sh
+# pk's OS boot hook :: CPU/IO/IPC tuning + binfmt (foreign-arch) setup
+#   boot option: pk_tune=1|report|desktop|hybrid   (ya /etc/default/pk me PK_TUNE=desktop)
+# Sab kuch best-effort: jo machine support na kare wo skip, boot kabhi nahi rokta.
+set -u
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+DEF=/etc/default/pk
+say() { printf 'pk-tune-hook: %s\n' "$*"; }
+mark() { ( printf '### PK: %s ###\n' "$*" > /dev/console ) 2>/dev/null; ( printf '%s\n' "$*" > /dev/kmsg ) 2>/dev/null; }
+
+mode=$(tr ' ' '\n' < /proc/cmdline 2>/dev/null | sed -n 's/^pk_tune=//p' | head -1)
+[ -n "$mode" ] || mode=$(sed -n 's/^PK_TUNE=//p' "$DEF" 2>/dev/null | head -1)
+[ -n "$mode" ] || exit 0
+case "$mode" in yes|on|1) mode=desktop ;; esac
+
+command -v pk-tune >/dev/null 2>&1 || { say "pk-tune nahi mila (image purani?)"; exit 0; }
+
+say "mode=$mode"
+case "$mode" in
+  report)  pk-tune report ;;
+  desktop) pk-tune desktop; pk-tune report ;;
+  hybrid)  pk-tune desktop; pk-tune hybrid ;;
+  undo)    pk-tune undo ;;
+  *)       pk-tune report ;;
+esac
+
+# foreign-arch Linux binaries (arm64/arm/riscv64/ppc64le) -> qemu-user + binfmt
+if command -v pk-binfmt >/dev/null 2>&1; then
+  pk-binfmt status 2>/dev/null
+  rt=/opt/pk
+  if [ -x "$rt/usr/bin/qemu-aarch64" ] || [ -e "$rt/usr/bin/qemu-aarch64" ] || [ -L "$rt/usr/bin/qemu-aarch64" ]; then
+    pk-binfmt register 2>/dev/null || true
+  fi
+fi
+
+# dispatch smoke test: ek synthetic arm64 ELF header -> pk-run sahi raasta bataye
+t=/run/pk/arch-smoke.bin
+mkdir -p /run/pk 2>/dev/null
+printf '\177ELF\002\001\001\000\000\000\000\000\000\000\000\000\002\000\267\000' > "$t" 2>/dev/null
+if [ -s "$t" ]; then
+  out=$(pk-run "$t" 2>&1 | tr '\n' '|' | cut -c1-90)
+  rm -f "$t" 2>/dev/null
+  case "$out" in
+    *aarch64*|*QEMU-USER-RAN*) mark "ARCH-DISPATCH-OK $out" ;;
+    *) mark "ARCH-DISPATCH-PARTIAL ${out:-<khaali>}" ;;
+  esac
+fi
+exit 0

@@ -1,0 +1,110 @@
+#!/bin/sh
+# pk's OS :: binfmt_misc - foreign-architecture Linux binaries ko transparently chalane ke liye
+#   pk-binfmt status              kaun-kaun se handlers registered hain
+#   pk-binfmt register            qemu-user (runtime ke andar) ke liye handlers banao
+#   pk-binfmt unregister          sab hatao
+#
+# Handler host kernel me register hote hain, par qemu-<arch> binary App Runtime ke andar
+# hota hai (Debian: qemu-user-static) -> isliye /proc/sys/fs/binfmt_misc me path
+# /opt/pk/usr/bin/qemu-aarch64 jaisa dikhega (kernel mount ke *root* se path resolve
+# karta hai, aur /opt/pk hamare host mount me hi hai -> kaam karta hai).
+#
+# Kya milta hai: arm64/arm/riscv64/ppc64le/s390x/mips Linux ELF -> direct ./binary chalo.
+# Mach-O (macOS/iOS) isse nahi chalta (Darwin syscalls chahiye) - ye sirf Linux ABI hai.
+set -u
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+BM=/proc/sys/fs/binfmt_misc
+RT=${PK_RUNTIME_ROOT:-/opt/pk}
+say()  { printf 'pk-binfmt: %s\n' "$*"; }
+warn() { printf 'pk-binfmt: %s\n' "$*" >&2; }
+mark() { ( printf '### PK: %s ###\n' "$*" > /dev/console ) 2>/dev/null; ( printf '%s\n' "$*" > /dev/kmsg ) 2>/dev/null; }
+
+# arch -> (emulator bin, magic hex, mask hex)
+archs() {
+  printf 'aarch64 qemu-aarch64 7f454c460201010000000000000000000200b700 7fffffffffffffffffffffffffffffffffffff00ff\n'
+  printf 'arm     qemu-arm     7f454c4601010100000000000000000002002800 7fffffffffffffffffffffffffffffffffffff00ff\n'
+  printf 'riscv64 qemu-riscv64 7f454c460201010000000000000000000200f300 7fffffffffffffffffffffffffffffffffffff00ff\n'
+  printf 'ppc64le qemu-ppc64le 7f454c4602010100000000000000000002001500 7fffffffffffffffffffffffffffffffffffff00ff\n'
+  printf 's390x   qemu-s390x   7f454c4602010100000000000000000002001600 7fffffffffffffffffffffffffffffffffffff00ff\n'
+}
+mount_bm() {
+  [ -d "$BM" ] || mkdir -p "$BM" 2>/dev/null
+  if [ ! -e "$BM/status" ]; then
+    modprobe binfmt_misc 2>/dev/null || true
+    mount -t binfmt_misc binfmt_misc "$BM" 2>/dev/null || true
+  fi
+  [ -e "$BM/status" ]
+}
+emulator_for() { # <arch>
+  a=$1
+  for cand in "$RT/usr/bin/qemu-$a" "$RT/usr/bin/qemu-$a-static" "/usr/bin/qemu-$a" "/usr/bin/qemu-$a-static"; do
+    [ -x "$cand" ] && { printf '%s\n' "${cand#$RT}"; return 0; }
+  done
+  # runtime ke andar hi ho to bhi theek (path /opt/pk prefix ke saath dena padega kernel ko)
+  if [ -n "$a" ] && [ -e "$RT/usr/bin/qemu-$a-static" ]; then
+    printf '/opt/pk/usr/bin/qemu-%s-static\n' "$a"; return 0
+  fi
+  printf '\n'; return 1
+}
+status() {
+  if [ ! -e "$BM/status" ]; then
+    say "binfmt_misc mount nahi hai (kernel module 'binfmt_misc' chahiye)"
+    mark "BINFMT-NOMOUNT"
+    return 1
+  fi
+  printf 'binfmt_misc: %s\n' "$(cat "$BM/status" 2>/dev/null)"
+  n=0
+  for f in "$BM"/qemu-* "$BM"/pk-*; do
+    [ -f "$f" ] || continue
+    n=$((n + 1))
+    printf '  %-16s %s\n' "$(basename "$f")" "$(sed -n 's/^interpreter *//p' "$f" 2>/dev/null)"
+  done
+  say "registered handlers: $n"
+  mark "BINFMT-STATUS-OK ($n)"
+  [ "$n" = 0 ] && say "  (kuch nahi -> pk-binfmt register)"
+  return 0
+}
+register() {
+  mount_bm || { warn "binfmt_misc mount fail (modprobe binfmt_misc)"; mark "BINFMT-FAIL (mount)"; return 1; }
+  have_any=0
+  reg=0
+  while read -r a em magic mask; do
+    [ -n "$a" ] || continue
+    emu=$(emulator_for "$a")
+    [ -n "$emu" ] || continue
+    have_any=1
+    name="pk-$a"
+    if [ -e "$BM/$name" ]; then rm -f "$BM/$name" 2>/dev/null; fi
+    if printf ':%s:M::%s::%s:POC\n' "$name" "$magic" "$mask" > "$BM/register" 2>/dev/null; then
+      reg=$((reg + 1))
+      say "registered $a -> $emu"
+    else
+      warn "$a register fail"
+    fi
+  done <<EOF
+$(archs)
+EOF
+  if [ "$have_any" = 0 ]; then
+    warn "koi qemu-user nahi mila. Install:  pk-get install -y qemu-user-static"
+    mark "BINFMT-NOQEMU"; return 70
+  fi
+  say "$reg handlers registered -> ab arm64/arm/riscv64 ELF direct:  pk-run ./binary"
+  mark "BINFMT-OK ($reg)"
+  return 0
+}
+unregister() {
+  n=0
+  for f in "$BM"/pk-*; do
+    [ -f "$f" ] || continue
+    rm -f "$f" 2>/dev/null && n=$((n + 1))
+  done
+  say "$n handlers hataye"; mark "BINFMT-UNREG ($n)"
+}
+case "${1:-status}" in
+  status) status ;;
+  register|setup) register ;;
+  unregister|remove) unregister ;;
+  archs) archs ;;
+  --help|-h) sed -n '2,14p' "$0" ;;
+  *) warn "unknown: $1"; exit 1 ;;
+esac

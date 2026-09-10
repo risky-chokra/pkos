@@ -76,6 +76,14 @@ live mode (persistence OFF) me `/var/lib/pk` RAM overlay par hota hai, isliye wa
 image **nahi** banate (2 GB ki image RAM me = OOM) — `pk-runtime` bolke RAM upper par
 chhod deta hai: `live mode (persistence off): rw image RAM me nahi banayenge`.
 
+## 2b. Extra flags (is round me)
+
+```sh
+pk-run --sandbox <app>   # app sandbox (namespaces + hidden home) - QA: APP-SANDBOX-OK
+pk-binfmt register       # foreign-arch Linux ELF (arm64/riscv64/...) via qemu-user
+pk-tune report|desktop|hybrid|swap|net|ipc|io
+```
+
 ## 3. Commands (image me maujood)
 
 ```sh

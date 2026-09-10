@@ -34,6 +34,17 @@ if [ "${WITH_RUNTIME:-0}" = 1 ] || [ -n "${PK_RUNTIME_IMG:-}" ]; then
   log "  + app runtime: $(du -h "$RTIMG" | cut -f1) -> /live/pk-runtime.sqfs"
 fi
 
+# payload integrity ke liye sidecar hashes (init me pk_verify=1 se check hote hain;
+# ye signed boot nahi hai - bas corruption/tamper ka pehla kadam)
+if have sha256sum; then
+  for f in "$STAGE/live/pk.sqfs" "$STAGE/live/pk-runtime.sqfs"; do
+    [ -f "$f" ] || continue
+    sha256sum "$f" | awk '{print $1}' > "$f.sha256"
+  done
+  ( cd "$STAGE" && sha256sum live/*.sqfs boot/pk-kernel boot/pk-initrd > SHA256SUMS 2>/dev/null ) || true
+  log "  payload sha256 sidecars likhe (pk_verify=1 se boot par check)"
+fi
+
 # grub menu (template se @ARGS@/@LABEL@/@VER@ bharte hain)
 mkdir -p "$STAGE/boot/grub"
 args=${KERNEL_CMDLINE:-"quiet loglevel=3"}

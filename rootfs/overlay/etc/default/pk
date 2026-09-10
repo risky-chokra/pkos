@@ -3,3 +3,9 @@
 PK_DHCP=${PK_DHCP:-no}    # yes = boot pe DHCP se IP lena
 PK_SSH=${PK_SSH:-no}     # yes = dropbear SSH server start
 PK_ISSUE=${PK_ISSUE:-yes}
+
+# CPU/IO/IPC tuning hook (S60tune) ka default mode: '' (off) | report | desktop | hybrid
+# boot option pk_tune=... ise override karta hai. desktop = governor/EPP + IO scheduler
+# + sysctls + cgroup weights (apps=200 / bg=20); hybrid = P/E cores detect karke daemons
+# ko efficiency cores par. Manual: pk-tune report | pk-tune desktop | pk-tune undo
+PK_TUNE=

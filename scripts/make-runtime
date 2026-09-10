@@ -111,7 +111,13 @@ case "$1" in -version|--version) echo 'openjdk version "17.0.0-fake" (pk tiny-st
 echo "fake-java: args $*"
 exit 0
 FJ
-  chmod 755 "$SUIT/usr/bin/wine" "$SUIT/usr/bin/waydroid" "$SUIT/usr/bin/java"
+  cat > "$SUIT/usr/bin/qemu-aarch64" <<'FQ'
+#!/bin/sh
+# tiny-runtime fake qemu-user (QA ke liye): args ka pehla path echo karta hai
+echo "QEMU-USER-RAN $*"
+exit 0
+FQ
+  chmod 755 "$SUIT/usr/bin/wine" "$SUIT/usr/bin/waydroid" "$SUIT/usr/bin/java" "$SUIT/usr/bin/qemu-aarch64"
   # "app" jo runtime ke andar se chalaya ja sakta hai (static busybox hi kaafi hai)
   cat > "$SUIT/usr/bin/pk-tiny-app" <<'APP'
 #!/bin/sh

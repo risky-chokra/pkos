@@ -117,7 +117,7 @@ wipe_disk() {
 # ---------------------------------------------------------------- 0: test ISO
 stage "0/8  test ISO variant (default args: selftest + poweroff + ttyS0)"
 if true; then   # stage 0 sasta hai (~1s) -> hamesha fresh test ISO banega
-  if OUT=$TISO PK_TEST_CMDLINE="pk_selftest pk_poweroff console=ttyS0 loglevel=4" \
+  if OUT=$TISO PK_TEST_CMDLINE="pk_selftest pk_poweroff pk_verify=1 pk_tune=report console=ttyS0 loglevel=4" \
        "$PK_ROOT/scripts/mk-iso" > "$LOGDIR/00-mkiso.log" 2>&1; then
     pass "test ISO: $(basename "$TISO") ($(du -h "$TISO" | cut -f1))"
   else
@@ -135,6 +135,8 @@ stage "1/8  live boot from ISO (grub + cdrom)"
   L=$LOGDIR/01-live.log
   check "$L" 'PK: BOOT-OK mode=live'  "grub -> kernel -> initrd -> squashfs + overlay -> init"
   check "$L" 'PK: SELFTEST-OK'        "self test pass (RAM overlay writable)"
+  check "$L" 'PK: VERIFY-OK'          "live payload ka sha256 match hua (pk_verify=1)"
+  check "$L" 'PK: TUNE-REPORT-OK'     "pk-tune report (sched/io/ipc/security knobs padhe)"
   check "$L" 'base is read-only'         "squashfs base read-only hai"
   check "$L" 'live medium visible'       "installer ke liye medium mount hai"
   check "$L" 'PK: DEPS-OK'            "installer ke tools (parted/mke2fs/grub-install...) chal sakte hain"
@@ -157,6 +159,7 @@ elif want 2 || want 3; then
   check "$L" 'PK: INSTALL-OK'          "installer pura hua (partition + copy + grub)"
   check "$L" 'PK: INSTALL-DONE rc=0'   "autoinstall hook exit 0"
   check "$L" 'PK: POWER-OFF'           "pk_halt -> poweroff"
+  check "$L" 'PK: INSTALL-JOURNAL-OK' "installed root ext4 journal ke saath (crash-safe)"
   if grep -q 'INSTALL-FAIL\|INSTALL-DONE rc=[1-9]' "$L"; then
     note "--- install log tail ---"; tail -30 "$L" | sed 's/^/    /'
   fi
@@ -458,7 +461,7 @@ stage "8/8  pendrive kit: pk-check + keymap + install (user + runtime) + install
   note "kit ISO banati hoon (runtime ISO ke andar; selftest+poweroff args)"
   rm -f "$KISO"
   if OUT="$KISO" WITH_RUNTIME=1 PK_RUNTIME_IMG="$RTSRC" \
-       PK_TEST_CMDLINE="pk_selftest pk_poweroff console=ttyS0 loglevel=4" \
+       PK_TEST_CMDLINE="pk_selftest pk_poweroff pk_verify=1 pk_tune=report console=ttyS0 loglevel=4" \
        "$PK_ROOT/scripts/mk-iso" > "$LOGDIR/08-mkkit.log" 2>&1; then
     pass "kit ISO bani (runtime andar): $(du -h "$KISO" | cut -f1)"
   else
@@ -467,7 +470,7 @@ stage "8/8  pendrive kit: pk-check + keymap + install (user + runtime) + install
   rm -f "$KITDISK"
   dd if=/dev/zero of="$KITDISK" bs=1M count="$DISKMB" status=none conv=sparse
 
-  A8="console=ttyS0 loglevel=4 pk_media=/dev/vda pk_install=/dev/vdb pk_silent pk_selftest pk_rootpw=$TESTPW pk_install_user=kituser pk_install_userpw=$TESTPW pk_check=1 pk_keymap=us pk_net=dhcp"
+  A8="console=ttyS0 loglevel=4 pk_media=/dev/vda pk_install=/dev/vdb pk_silent pk_selftest pk_rootpw=$TESTPW pk_install_user=kituser pk_install_userpw=$TESTPW pk_check=1 pk_keymap=us pk_net=dhcp pk_tune=desktop"
   if [ "${PK_TEST_GUI:-0}" = 1 ]; then
     A8="$A8 pk_desktop=1 pk_check=gui"
     KTMO=$(( KTMO + 300 ))
@@ -497,6 +500,12 @@ stage "8/8  pendrive kit: pk-check + keymap + install (user + runtime) + install
       note "  (xdpyinfo row skip - Wayland-only session; GUI-APP-OK hi asli proof hai)"
     fi
   fi
+  note "stage-9 style checks (pk-tune/pk-binfmt) isi boot me:"
+  A9=$(printf 'pk_selftest')
+  # (VM me ye commands pk-boot ke S90 hook se chalte hain - markers niche check)
+  check "$L" 'PK: TUNE-REPORT-OK'     "pk-tune report chala (scheduling/io/ipc/security knobs padhe)"
+  check "$L" 'PK: BINFMT-'            "pk-binfmt status ne handlers ki sthiti batayi"
+  check "$L" 'PK: ARCH-DISPATCH-OK'   "foreign-arch (arm64) ELF -> qemu-user/binfmt dispatch sahi"
   if grep -q 'CHECK-SUMMARY' "$L" 2>/dev/null; then
     note "pk-check: $(grep -o 'CHECK-SUMMARY[^#]*' "$L" | head -1 | tr -d '\r')"
   else

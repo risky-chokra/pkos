@@ -28,3 +28,6 @@ dropbearkey
 # apps layer
 unsquashfs
 mksquashfs
+setfacl
+swapon
+dumpe2fs

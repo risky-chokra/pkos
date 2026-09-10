@@ -20,13 +20,38 @@ busybox-static + squashfs (read-only /) + overlayfs (upper = RAM / PK-PERSIST pa
 + boot hooks        (net+DHCP, dropbear SSH, persistence, runtime, keymap, check, desktop)
 ```
 
+## 1c. Modern-desktop spec pass (aaj ka doosra round) → `docs/ARCHITECTURE.md`
+
+Aapki 7-section requirement list ko item-by-item map kiya (kaun deliver karta hai + verify
+command + status). Code me jo **add** hua:
+
+| spec item | kya bana | QA proof |
+|---|---|---|
+| 1.3 interactive foreground priority | `pk-tune desktop`: cgroup v2 `pk.slice/apps` = `cpu.weight 200`, `bg` = 20, `sched_autogroup=1`, governor powersave + EPP; `pk-desktop` compositor + `pk-desktop app` clients ko apps slice me daalta hai; manual `pk-tune fg|bg <pid|name>` | `TUNE-REPORT-OK` ✓ |
+| 1.4 P/E (heterogeneous) awareness | `pk-tune hybrid`: `cpu_capacity` se big(≥900)/little(≤700) split → `cpuset.cpus` (daemons little par). VM me `uniform` aata hai — expected | ✓ |
+| 2.3 dynamic HiDPI + multi-monitor | `pk-desktop outputs` (DRM se modes), `scale 2 [OUT]`, `mode`, `transform`, `arrange`, `restart` → `weston.ini` runtime me likhta hai, reboot nahi | ini-merge test ✓ |
+| 3.1 demand paging + swap | `pk-tune swap [MB]` (holes-free swapfile → mkswap → swapon; sparse swapfile valid nahi hota) | ✓ |
+| 3.3 journaling | installer `dumpe2fs` se ext4 `has_journal` verify karta hai | `INSTALL-JOURNAL-OK` ✓ (stage 2) |
+| 4.2 plug & play drivers | **`S15mdev` hook**: busybox mdev → `/proc/sys/kernel/hotplug`, `hotplug.sh` me `modprobe $MODALIAS` (+ NIC aaye to `pk-net dhcp`); `pk_mdev=off` se band | `MDEV-OK` ✓ |
+| 5.3 app sandboxing | `pk-run --sandbox` = user/mnt/pid/ipc/net namespaces + tmpfs over `/root /home /mnt/persist` + ro remount try; kernel user-ns na de to `APP-SANDBOX-UNAVAIL` (boot/app kabhi nahi rokta) | `APP-SANDBOX-OK` ✓ (leak assert ke saath) |
+| 5.4 root of trust (partial) | `mk-iso` → `/live/pk.sqfs.sha256` + `/live/pk-runtime.sqfs.sha256` + ISO-root `SHA256SUMS`; init `pk_verify=1` par hash match (warn) / `pk_verify=require` par **boot rok deta hai** | `VERIFY-OK` ✓ (stage 1) |
+| 6.2 foreign-arch binaries | `pk-binfmt status|register|unregister` (binfmt_misc handlers `pk-aarch64/arm/riscv64/ppc64le/s390x`) + `pk-run` e_machine(offset 18) parse → qemu-user se dispatch; `binfmt_misc`+`cpufreq` modules live image me | `ARCH-DISPATCH-OK` ✓ |
+| 7.1/7.2 net + IPC | `pk-tune net` (rmem/wmem 16 MiB, `fq`, BBR, TCP_FASTOPEN, jumbo) + `pk-tune ipc` (`/dev/shm`, POSIX mqueue, `io_uring_disabled=0`) | ✓ |
+| security observability | `pk-tune report`: ASLR/`ptrace_scope`/lockdown/CPU-vuln count/TPM device/hotplug/swap/cgroup rows | ✓ |
+
+**Full 8-stage suite: QA PASS 64 checks ok** (stage 2 = 8, stage 7 = 14, stage 8 = 19 ✓).
+🚫 jo is design/hardware par possible nahi (reason ke saath doc me): Secure Boot signing +
+TPM measured boot ka poora round, VBS (type-1 hypervisor neeche chahiye — alternative:
+`pk-vm` se app-in-VM), LSM/RBAC policy, DirectStorage GPU-P2P, kernel EAS integration,
+iOS native (Mach-O + closed UIKit). Roadmap: `docs/ARCHITECTURE.md` §9.
+
 ## 2. Aaj ka round (iOS + "sab add karo sahi se")
 
 | cheez | status |
 |---|---|
 | `make doctor` | sab ready (0 missing) |
 | `make iso` | `build/pkos.iso` = **87 633 920 bytes (84 MiB)** (delivered `pkos-1.0.iso` isi size ka) |
-| `make test` (QEMU, **8 stages**) | **QA PASS 62 checks ok**, rc=0 |
+| `make test` (QEMU, **8 stages**) | **QA PASS 64 checks ok**, rc=0 (+6 is round: verify, mdev, tune, binfmt, journal, sandbox/arch) |
 | `make gui-test` (stage 8 + desktop) | **QA PASS 19 checks ok** — GUI bhi asli verify |
 | `make apps-iso` | `build/pkos-apps.iso` = **700 MiB** (App Runtime + apt + Wine + weston/Xvfb andar) |
 | `make iso REPRODUCIBLE=1` | do alag builds ke `/live/pk.sqfs` + `/boot/pk-initrd` **sha256 same** ✓ |
@@ -120,7 +145,7 @@ sudo apt-get install -y build-essential busybox-static cpio squashfs-tools xorri
 sudo apt-get install -y debootstrap                      # App Runtime ke liye
 
 cd pkos
-make doctor && make iso && make test        # ~15 min, 62 checks
+make doctor && make iso && make test        # ~15-18 min, 64 checks
 sudo make runtime-desktop && make apps-iso # GUI+wine wala runtime, phun 700 MiB ISO
 make kit                                    # iso + apps-iso + manifests + bundle (ek saath)
 

@@ -194,6 +194,21 @@ note "filesystems format kar raha hoon"
 mkfs.ext4 -q -F -L pkos "$ROOTP" 2>/dev/null || mke2fs -q -F -L pkos "$ROOTP" || die "mkfs.ext4 fail"
 [ -n "$ESPP" ] && { mkfs.vfat -F 32 -n PK-EFI "$ESPP" >/dev/null 2>&1 || die "mkfs.vfat fail"; }
 
+# crash-safety: ext4 journal on hona chahiye (default hai; marker install ke *ant* me
+# chhapte hain - pk_silent mode me log ka sirf tail console par aata hai)
+JRN=""
+if have dumpe2fs; then
+  feats=$(dumpe2fs -h "$ROOTP" 2>/dev/null | awk -F: '/^Filesystem features/{print $2}')
+  case "$feats" in
+    *has_journal*) JRN=ok ;;
+    ?*)            JRN="warn:${feats:-none}" ;;
+    *)             JRN="no-features-line" ;;
+  esac
+else
+  JRN="no-dumpe2fs-in-image"
+fi
+note "  ext4 journal check: $JRN"
+
 TGT=/mnt/install
 mkdir -p "$TGT"
 mount "$ROOTP" "$TGT" || die "root mount fail"
@@ -407,5 +422,10 @@ cat <<FIN
    reboot -f     (ya power off karke USB hatao)
 ==============================================================
 FIN
+case "$JRN" in
+  ok) echo "### PK: INSTALL-JOURNAL-OK (ext4 has_journal) ###" ;;
+  "") echo "### PK: INSTALL-JOURNAL-SKIP ###" ;;
+  *)  echo "### PK: INSTALL-JOURNAL-WARN ($JRN) ###" ;;
+esac
 echo "### PK: INSTALL-OK target=$TARGET root=$ROOTP ###"
 exit 0

@@ -5,6 +5,9 @@
 #   pk-desktop status         kya chal raha hai, kaunsa display
 #   pk-desktop stop           session band
 #   pk-desktop vnc <port>     Xvfb + vnc (headless machine ko screen dikhane ke liye)
+#   pk-desktop outputs        connected displays + current modes (DRM se)
+#   pk-desktop scale 2 [OUT]  High-DPI scaling (weston.ini)   mode/transform/arrange bhi
+#   pk-desktop restart        ini reload (session dobara start)
 #
 # Sabse achha experience: runtime me weston + xterm (make runtime --variant=desktop/full).
 set -u
@@ -17,6 +20,64 @@ mark() { ( printf '### PK: %s ###\n' "$*" > /dev/console ) 2>/dev/null; ( printf
 runtime_ok() { grep -q " $RT " /proc/mounts 2>/dev/null && [ -d "$RT/usr" ]; }
 rtbin() { runtime_ok && { [ -x "$RT/usr/bin/$1" ] || [ -e "$RT/usr/bin/$1" ] || [ -L "$RT/usr/bin/$1" ]; }; }
 
+INI=""   # set karta hoon pehli baar jab zaroorat pade
+ini_path() {
+  [ -n "$INI" ] && return 0
+  if [ -d "$RT/etc" ]; then INI=$RT/etc/weston.ini; else INI=/etc/weston.ini; fi
+}
+ini_set() { # <section> <key> <value>
+  ini_path
+  sec=$1; k=$2; v=$3
+  mkdir -p "$(dirname "$INI")" 2>/dev/null
+  touch "$INI" 2>/dev/null || { warn "$INI likhne layak nahi"; return 1; }
+  awk -v sec="$sec" -v k="$k" -v v="$v" '
+    BEGIN { hdr="[" sec "]"; insec=0; seen=0; exists=0 }
+    /^\[/ {
+      if (insec && !seen) { print k "=" v; seen=1 }
+      insec = ($0 == hdr)
+      if ($0 == hdr) exists=1
+      print; next
+    }
+    {
+      if (insec && !seen && $0 ~ "^" k "=") { print k "=" v; seen=1; next }
+      print
+    }
+    END {
+      if (insec && !seen) print k "=" v
+      else if (!exists) { printf ""; printf "\n%s\n%s=%s\n", hdr, k, v }
+    }' "$INI" > "$INI.new" 2>/dev/null && mv -f "$INI.new" "$INI"
+  say "$INI me [$sec] $k=$v"
+}
+drm_outputs() {
+  n=0
+  for c in /sys/class/drm/card*-*/; do
+    [ -d "$c" ] || continue
+    st=$(cat "$c/status" 2>/dev/null)
+    [ "$st" = connected ] || continue
+    nm=$(basename "$c"); nm=${nm#card*-}
+    mode=$(head -1 "$c/modes" 2>/dev/null)
+    allmodes=$(tr '\n' ' ' < "$c/modes" 2>/dev/null | cut -c1-70)
+    dpms=$(cat "$c/dpms" 2>/dev/null)
+    printf '  %-14s %s  current=%s  dpms=%s\n' "$nm" "$st" "${mode:-?}" "${dpms:-?}"
+    [ -n "$allmodes" ] && printf '                 modes: %s\n' "$allmodes"
+    n=$((n + 1))
+  done
+  [ "$n" = 0 ] && printf '  (koi connected DRM output nahi - VM/headless?)\n'
+  return 0
+}
+outputs() {
+  printf 'connected displays (/sys/class/drm):\n'
+  drm_outputs
+  if [ -r /run/pk/x-env ]; then
+    . /run/pk/x-env
+    printf 'session: DISPLAY=%s WAYLAND=%s\n' "${DISPLAY:-none}" "${WAYLAND_DISPLAY:-none}"
+  else
+    printf 'session: koi nahi (pk-desktop chalao)\n'
+  fi
+  ini_path
+  [ -f "$INI" ] && { printf '\nweston.ini (%s):\n' "$INI"; sed -n '1,40p' "$INI" | sed 's/^/  /'; }
+  mark "DESKTOP-OUTPUTS-OK"
+}
 status() {
   if [ -r /run/pk/x-env ]; then
     . /run/pk/x-env
@@ -70,6 +131,10 @@ W
     say "session ready hai; client nahi khola (xterm/weston-terminal runtime me nahi)"
     say "  app:  pk-desktop app <naam>   (jaise: pk-desktop app htop)"
   fi
+  # foreground priority (cgroup apps slice -> cpu.weight 200)
+  if command -v pk-tune >/dev/null 2>&1; then
+    for sess in weston Xorg Xvfb; do pk-tune fg "$sess" >/dev/null 2>&1 && break; done
+  fi
   say "session chal raha hai: DISPLAY=${DISPLAY:-} WAYLAND=${WAYLAND_DISPLAY:-}"
   say "terminal khola (agar xterm hai). App:  pk-desktop app <naam>"
   mark "DESKTOP-OK (${DISPLAY:-${WAYLAND_DISPLAY:-?}})"
@@ -97,8 +162,36 @@ case "${1:-start}" in
   start|"") shift 2>/dev/null || true; start ;;
   app)      shift; [ $# -gt 0 ] || { echo "usage: pk-desktop app <x> [args...]"; exit 1; }
             [ -r /run/pk/x-env ] && . /run/pk/x-env && export DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR
-            pk-run --gui "$@" ;;
+            pk-run --gui "$@" &
+            ap=$!
+            # app ko foreground slice me daalo (interactive priority)
+            command -v pk-tune >/dev/null 2>&1 && pk-tune fg "$ap" >/dev/null 2>&1 || true
+            wait "$ap" ;;
   status)   status ;;
+  outputs|displays|monitors) outputs ;;
+  scale)
+    shift; sc=${1:-1}; out=${2:-}
+    [ -n "$out" ] && ini_set "output:$out" scale "$sc" || ini_set "output" scale "$sc"
+    say "scale=$sc set kiya (weston HiDPI); session reload: pk-desktop restart"
+    mark "DESKTOP-SCALE-OK ($sc${out:+ on $out})" ;;
+  mode)
+    shift; out=${1:-}; m=${2:-}
+    [ -n "$out" ] && [ -n "$m" ] || { echo "usage: pk-desktop mode <OUTPUT> <WxH[@Hz]>"; exit 1; }
+    ini_set "output:$out" mode "$m"; mark "DESKTOP-MODE-OK ($out $m)" ;;
+  transform)
+    shift; out=${1:-}; t=${2:-normal}
+    ini_set "output:$out" transform "$t"; mark "DESKTOP-TRANSFORM-OK ($out $t)" ;;
+  arrange)
+    shift; x=0
+    for o in "$@"; do
+      ini_set "output:$o" x "$x"; ini_set "output:$o" y "0"
+      x=$((x + 1920))
+    done
+    say "layout likha (left-to-right: $*); restart karo"; mark "DESKTOP-ARRANGE-OK" ;;
+  ini)    ini_path; [ -f "$INI" ] && cat "$INI" || echo "(ini nahi bani abhi)"; ;;
+  restart)
+    pk-x stop >/dev/null 2>&1
+    start ;;
   stop)     pk-x stop ;;
   vnc)      shift; vnc "${1:-5900}" ;;
   --help|-h) sed -n '2,10p' "$0" ;;
