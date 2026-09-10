@@ -1,6 +1,10 @@
 # pk's OS · TROUBLE — debug guide (initramfs shell se installer tak)
 
-Sabse pehle: **markers padho**. Live system har milestone `/dev/kmsg` me likhta hai,
+Sabse pehle: **`pk-check --save`** chalao (live system me) — ye net/USB speed/disks/DRM/KVM/
+SecureBoot/runtime/wine/dmesg ka ek table banata hai aur report `/run/pk/check.txt`
+(+ `/tmp/pk-check.txt`) me likh deta hai. Debug karne ke liye yahi sabse tez hai.
+
+Uske baad: **markers padho**. Live system har milestone `/dev/kmsg` me likhta hai,
 isliye ek boot ke baad bhi poori kahani milti hai:
 
 ```sh

@@ -16,6 +16,11 @@ export PK_ROOT := $(CURDIR)
 BUILD       := $(PK_ROOT)/build
 WORK        := $(BUILD)/work
 STAMP       := $(WORK)/.stamps
+REPRODUCIBLE ?= 0
+ifeq ($(REPRODUCIBLE),1)
+export SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct 2>/dev/null || echo 1700000000)
+endif
+
 OUT         ?= $(BUILD)/pkos.iso
 export OUT
 ISO         := $(OUT)
@@ -34,7 +39,7 @@ export SUDO QEMU PK_KERNEL PK_MODULES PK_BUSYBOX SQUASH_COMP KERNEL_CMDLINE PK_Q
 
 SRC := $(shell find $(PK_ROOT)/rootfs $(PK_ROOT)/scripts $(PK_ROOT)/init $(PK_ROOT)/config -type f 2>/dev/null | tr '\n' ' ')
 
-.PHONY: all help doctor live squash initrd iso runtime run run-tty run-iso run-efi test test-live test-apps usb kernel clean clean-rootfs clean-runtime deepclean rootfs
+.PHONY: all help doctor live squash initrd iso runtime runtime-desktop apps-iso manifest verify check gui-test bundle run run-tty run-iso run-efi test test-live test-apps usb kernel clean clean-rootfs clean-runtime deepclean rootfs
 
 all: iso
 
@@ -45,9 +50,17 @@ help:
 	@echo "  make run        QEMU me live boot (headless pe serial + direct kernel boot)"
 	@echo "  make run-iso    QEMU me pura ISO+GRUB boot (display chahiye)"
 	@echo "  make run-efi    QEMU me UEFI live boot"
-	@echo "  make test       auto end-to-end test (live + install + installed boot + apps)"
+	@echo "  make test       auto end-to-end QA (8 stages: live, install, installed, toram,"
+	@echo "                      UEFI, persistence+net+ssh, apps, pendrive kit)"
+	@echo "  make check      sirf stage 8 (pk-check + keymap + install+user+runtime)"
+	@echo "  make gui-test   stage 8 + desktop session (weston/Xvfb + xterm round-trip)"
+	@echo "  make apps-iso   base ISO + App Runtime andar  -> build/pkos-apps.iso"
+	@echo "  make manifest   ISO ke payload hashes (build/manifest.txt) -> rebuild verify"
+	@echo "  make verify     manifest se ISO/USB verify (tools/verify-usb.sh)"
+	@echo "  make bundle     git bundle + source tar (sandbox reset se bachne ke liye)"
 	@echo "  sudo make runtime   # App Runtime (Debian squashfs) -> build/pk-runtime.sqfs"
-	@echo "                      # VARIANT=lean|full|dev  PKGS=wine,firefox-esr"
+	@echo "                      # VARIANT=lean|desktop|full|dev   PKGS=wine,firefox-esr"
+	@echo "  sudo make runtime-desktop   # GUI wala runtime (weston+Xvfb+xterm+mesa+wine)"
 	@echo "  make iso WITH_RUNTIME=1   # runtime ISO ke andar (/live/pk-runtime.sqfs)"
 	@echo "  make test-apps    apps layer ka QA (14 checks; REAL_RUNTIME=1 / WINE=1 bhi)"
 	@echo "                      # PK_TEST_REAL_RUNTIME=1 make test-apps  (asli Debian se)"
@@ -56,6 +69,9 @@ help:
 	@echo "  make kernel     apna kernel banao (build/kernel-<ver>), phir:"
 	@echo "                      make clean-rootfs && make iso PK_KERNEL=... PK_MODULES=..."
 	@echo "  make clean"
+	@echo "notes:"
+	@echo "  make iso REPRODUCIBLE=1   # SOURCE_DATE_EPOCH se squashfs/initrd byte-stable"
+	@echo "  console keymaps ke liye builder par 'kbd' chahiye (na ho to pk-keymap GUI-only)"
 
 doctor:
 	@scripts/doctor.sh
@@ -83,6 +99,24 @@ $(STAMP)/initrd: $(STAMP)/rootfs $(PK_ROOT)/init/init $(PK_ROOT)/init/kernel-mod
 # app runtime: build/pk-runtime.sqfs (+ rw img) - Linux/Windows apps ke liye
 runtime:
 	@sh scripts/make-runtime $(if $(strip $(VARIANT)),--variant=$(VARIANT),) $(if $(strip $(PKGS)),--pkgs=$(PKGS),)
+runtime-desktop:
+	@sh scripts/make-runtime --variant=desktop --rw-mb=$(or $(RWMB),2048)
+apps-iso: iso
+	@OUT=$(BUILD)/pkos-apps.iso PK_RUNTIME_IMG=$(or $(RUNTIME_IMG),$(BUILD)/pk-runtime.sqfs) WITH_RUNTIME=1 scripts/mk-iso
+	@echo "[pk] apps ISO: $(BUILD)/pkos-apps.iso"
+manifest: iso
+	@scripts/manifest.sh $(ISO) $(BUILD)/manifest.txt
+verify: manifest
+	@tools/verify-usb.sh --iso $(ISO) $(BUILD)/manifest.txt
+check: iso
+	@PK_TEST_STAGES=8 $(MAKE) test
+gui-test: iso
+	@PK_TEST_STAGES=8 PK_TEST_GUI=1 $(MAKE) test
+bundle:
+	@git bundle create $(BUILD)/pkos-main.bundle --all >/dev/null 2>&1 || true
+	@tar --exclude=build --exclude=.git -czf $(BUILD)/pkos-src.tar.gz -C .. pkos 2>/dev/null || true
+	@echo "[pk] bundle: $(BUILD)/pkos-main.bundle  +  $(BUILD)/pkos-src.tar.gz"
+	@echo "[pk] dono /home/user me copy kar lo (persist ke liye): cp $(BUILD)/pkos-*.tar.gz $(BUILD)/pkos-main.bundle .."
 clean-runtime:
 	@rm -f $(BUILD)/pk-runtime.sqfs $(BUILD)/pk-runtime-rw.img
 	@echo "runtime images hataye (make runtime se dobara ban jayenge)"

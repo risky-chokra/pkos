@@ -123,22 +123,62 @@ for c in /dev/dri/card*; do [ -e "$c" ] && drm="$drm $c"; done
 for c in /dev/dri/renderD128*; do [ -e "$c" ] && drm="$drm $c"; done
 if [ -n "$drm" ]; then row ok drm "KMS devices:$drm (weston KMS backend chalega)"; else row info drm "/dev/dri nahi (weston ko headless/Xvfb chahiye)"; fi
 if [ "$DOGUI" = 1 ]; then
-  if [ -x /usr/bin/pk-x ]; then
+  rt_has() { for d in "$RT/usr/bin" "$RT/usr/local/bin" "$RT/bin"; do
+               { [ -x "$d/$1" ] || [ -e "$d/$1" ] || [ -L "$d/$1" ]; } && return 0
+             done; return 1; }
+  if command -v pk-x >/dev/null 2>&1; then
     pk-x start > /run/pk/gui-start.log 2>&1
     rc=$?
     [ -r /run/pk/x-env ] && . /run/pk/x-env
     if [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
+      ( printf '### PK: GUI-X-OK (%s) ###\n' "${DISPLAY:-${WAYLAND_DISPLAY:-wayland}}" > /dev/console ) 2>/dev/null
       row ok display "pk-x start ok: DISPLAY=${DISPLAY:-none} WAYLAND=${WAYLAND_DISPLAY:-none} (rc=$rc)"
-      if [ -x "$RT/usr/bin/xdpyinfo" ] && [ -n "${DISPLAY:-}" ]; then
-        out=$(pk-run --gui xdpyinfo 2>&1 | sed -n '2p' | tr '\n' ' ' | cut -c1-70)
-        if [ -n "$out" ]; then row ok xclient "xdpyinfo: $out"; else row fail xclient "X client connect nahi hua"; fi
-      fi
-      if [ -x "$RT/usr/bin/xterm" ]; then
-        if pk-run --gui xterm -e /bin/sh -c 'echo GUI-APP-OK > /tmp/gui-app.txt' >/dev/null 2>&1; then
-          row ok xterm "xterm -e 'echo' chala (X client round-trip)"
+      # weston ke andar XWayland ho to :0 pe X clients chal sakte hain
+      xd=${DISPLAY:-}
+      if [ -z "$xd" ] && [ -e "$RT/tmp/.X11-unix/X0" ]; then xd=":0"; row info xwayland "XWayland socket mila ($RT/tmp/.X11-unix/X0)"; fi
+      if [ -n "$xd" ] && rt_has xdpyinfo; then
+        out=$(DISPLAY="$xd" pk-run --gui xdpyinfo 2>&1 | sed -n '2p' | tr '\n' ' ' | cut -c1-70)
+        if [ -n "$out" ]; then
+          row ok xclient "xdpyinfo ($xd): $out"
+          ( printf '### PK: GUI-XCLIENT-OK ###\n' > /dev/console ) 2>/dev/null
         else
-          row warn xterm "xterm rc!=0 (detail: cat /run/pk/x.log)"
+          row warn xclient "xdpyinfo ne output nahi diya (X server ready ho sakta hai, client fail)"
         fi
+      fi
+      # ek asli GUI client: xterm (X11) ya weston-terminal (Wayland)
+      if [ -n "$xd" ] && rt_has xterm; then
+        if DISPLAY="$xd" pk-run --gui xterm -e /bin/sh -c "echo PK-GUI-APP-RAN" >/dev/null 2>&1; then
+          row ok guiapp "xterm -e (X11 client) chala ✓"
+          ( printf '### PK: GUI-APP-OK (xterm) ###\n' > /dev/console ) 2>/dev/null
+        else
+          row fail guiapp "xterm rc!=0 (detail: /run/pk/x.log)"
+          ( printf '### PK: GUI-APP-FAIL (xterm) ###\n' > /dev/console ) 2>/dev/null
+        fi
+      elif rt_has weston-info; then
+        out=$(pk-run --gui weston-info 2>&1 | tr '\n' ' ' | cut -c1-90)
+        case "$out" in
+          *"wl_compositor"*|*"wl_seat"*|*"Output"*|*"compositor"*)
+            row ok guiapp "weston-info: $out"
+            ( printf '### PK: GUI-APP-OK (weston-info) ###\n' > /dev/console ) 2>/dev/null ;;
+          *) row fail guiapp "weston-info kuch nahi bola: ${out:-<khaali>} (log: /run/pk/x.log)"
+             ( printf '### PK: GUI-APP-FAIL (weston-info) ###\n' > /dev/console ) 2>/dev/null ;;
+        esac
+      elif rt_has weston-terminal; then
+        DISPLAY="$xd" pk-run --gui weston-terminal >/tmp/wl-cli.log 2>&1 &
+        wlp=$!
+        sleep 4
+        if kill -0 "$wlp" 2>/dev/null; then
+          row ok guiapp "weston-terminal zinda hai (compositor ne client accept kiya) ✓"
+          ( printf '### PK: GUI-APP-OK (weston-terminal) ###\n' > /dev/console ) 2>/dev/null
+          kill "$wlp" 2>/dev/null
+        else
+          row fail guiapp "weston-terminal turant band: $(tr '\n' '|' < /tmp/wl-cli.log 2>/dev/null | cut -c1-90)"
+          ( printf '### PK: GUI-APP-FAIL (weston-terminal) ###\n' > /dev/console ) 2>/dev/null
+        fi
+      elif rt_has xterm; then
+        row warn guiapp "DISPLAY nahi set (Wayland-only, XWayland nahi) - xterm skip"
+      else
+        row info guiapp "runtime me koi terminal client nahi (pk-get install -y xterm weston)"
       fi
       [ "$VERB" = 1 ] && { echo '  -- pk-x log --'; tail -6 /run/pk/x.log 2>/dev/null | sed 's/^/  /'; }
     else
@@ -146,7 +186,7 @@ if [ "$DOGUI" = 1 ]; then
       tail -4 /run/pk/gui-start.log 2>/dev/null | sed 's/^/       /'
     fi
   else
-    row warn display "/usr/bin/pk-x nahi (image purani?)"
+    row warn display "pk-x nahi mila (image purani?)"
   fi
 fi
 
@@ -184,7 +224,10 @@ fw=''
 for f in /lib/firmware /vendor_fw; do
   [ -d "$f" ] && fw="$fw $f:$(ls "$f" 2>/dev/null | wc -l)"
 done
-if [ -n "$wdev" ]; then row ok wifi "wireless iface:$wdev (connect: wpa_supplicant nahi hai -> docs/APPS.md)"; else row info wifi "wireless iface nahi dikha; firmware:${fw:- none} (ISO me PK_FIRMWARE=1 se drivers aaate hain)"; fi
+if command -v pk-wifi >/dev/null 2>&1; then
+  ws=$(pk-wifi status 2>/dev/null | tr '\n' ' ' | tr -s ' ' | cut -c1-150)
+  row info wifi "$ws"
+elif [ -n "$wdev" ]; then row ok wifi "wireless iface:$wdev (pk-wifi nahi hai - image purani?)"; else row info wifi "wireless iface nahi dikha; firmware:${fw:- none} (ISO build me PK_FIRMWARE=1 se drivers aaate hain)"; fi
 if [ -x /sbin/pk-ssh ]; then
   if pgrep dropbear >/dev/null 2>&1; then row ok ssh "dropbear :22 chal raha hai"; else row info ssh "dropbear band (pk-ssh start)"; fi
 fi

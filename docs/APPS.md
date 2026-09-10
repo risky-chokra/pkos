@@ -17,6 +17,7 @@ base ISO (busybox, ~78 MiB)  +  pk-runtime.sqfs (Debian minbase, ~37 MiB)
 
 ```sh
 sudo make runtime                     # lean: hello, vim-tiny, htop, wget, ca-certs
+sudo make runtime-desktop             # + weston, xterm, Xvfb, x11-utils, mesa, wine (GUI)
 sudo make runtime VARIANT=full        # + apt-utils, curl, less, file, man, sudo, locales
 sudo make runtime VARIANT=dev         # + build-essential, git, make, pkg-config
 sudo make runtime PKGS=wine,gnumeric,firefox-esr   # apni pasand ke packages
@@ -91,7 +92,8 @@ pk-get install -y vim            # apt (runtime ke andar) — network ho to
 pk-get update
 pk-chroot /usr/bin/htop -y       # runtime me chroot (binds: /proc /sys /dev /tmp /run)
 pk-chroot --umount               # binds hatao
-pk-x start weston                # GUI stack (runtime me weston/Xorg/Xvfb ho to)
+pk-x start | pk-x status         # display server (weston -> Xorg -> Xvfb), pk-desktop session
+pk-wifi status|scan|connect      # Wi-Fi (experimental; wpa_supplicant runtime me)
 pk-vm new win --size=40G         # QEMU guest (Windows / Android-x86 / macOS raasta)
 pk-vm run win --cdrom=win.iso --ram=4096 --vnc=:1
 pk-vm list

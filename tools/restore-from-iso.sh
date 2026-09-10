@@ -17,7 +17,8 @@ for t in xorriso unsquashfs; do
 done
 
 T=$(mktemp -d /tmp/pk-restore.XXXXXX)
-trap 'rm -rf "$T"' EXIT INT TERM
+cleanup() { chmod -R u+rwX "$T" 2>/dev/null; rm -rf "$T" 2>/dev/null; }
+trap cleanup EXIT INT TERM
 echo "[pk] ISO extract: $ISO"
 xorriso -osirrox on -indev "$ISO" -extract / "$T/iso" >/dev/null 2>&1
 SQ=$T/iso/live/pk.sqfs
@@ -72,5 +73,8 @@ bad=0
 for f in $(find "$OV" -type f \( -name 'pk-*' -o -name 'S[0-9]*' -o -name 'default.script' \) 2>/dev/null); do
   sh -n "$f" 2>/dev/null || { echo "[pk] SYNTAX FAIL: $f"; bad=1; }
 done
+if [ ! -d "$PK_ROOT/.git" ]; then
+  echo "[pk warn] .git nahi mila - history reset me gayab. Naya repo: git init -b main && git add -A && git commit -m 'restore'"
+fi
 [ "$bad" = 0 ] && echo "[pk] sh -n clean ✓  ab: make doctor && make iso"
 exit $bad

@@ -129,5 +129,11 @@ pack() {
 }
 log "packing (cpio + $icomp)..."
 normalize_tree "$IR"
-( cd "$IR" && LC_ALL=C find . -print0 | LC_ALL=C cpio --null -o -H newc -R 0:0 2>/dev/null ) | pack > "$OUT"
+cpioopt=""
+if cpio --help 2>&1 | grep -q -- '--reproducible'; then cpioopt="--reproducible"; fi
+if [ -n "${SOURCE_DATE_EPOCH:-}" ]; then
+  log "  reproducible: mtime = @$SOURCE_DATE_EPOCH, sorted cpio $cpioopt"
+  find "$IR" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} + 2>/dev/null || true
+fi
+( cd "$IR" && LC_ALL=C find . -print0 | LC_ALL=C sort -z | LC_ALL=C cpio --null -o -H newc -R 0:0 $cpioopt 2>/dev/null ) | pack > "$OUT"
 log "  -> $OUT ($(du -h "$OUT" | cut -f1))"

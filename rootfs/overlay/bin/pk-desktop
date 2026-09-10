@@ -60,8 +60,15 @@ pk's OS desktop
   check    :  pk-check --all
   iOS/Android: pk-ios why ; pk-android doctor
 W
-  if rtbin xterm; then
+  if [ -n "${DISPLAY:-}" ] && rtbin xterm; then
     pk-run --gui xterm -e sh -c 'cat /root/pk-desktop-welcome.txt; echo; exec /bin/sh' >/dev/null 2>&1 &
+    say "terminal khola (xterm)"
+  elif [ -n "${WAYLAND_DISPLAY:-}" ] && rtbin weston-terminal; then
+    pk-run --gui weston-terminal >/dev/null 2>&1 &
+    say "terminal khola (weston-terminal)"
+  else
+    say "session ready hai; client nahi khola (xterm/weston-terminal runtime me nahi)"
+    say "  app:  pk-desktop app <naam>   (jaise: pk-desktop app htop)"
   fi
   say "session chal raha hai: DISPLAY=${DISPLAY:-} WAYLAND=${WAYLAND_DISPLAY:-}"
   say "terminal khola (agar xterm hai). App:  pk-desktop app <naam>"

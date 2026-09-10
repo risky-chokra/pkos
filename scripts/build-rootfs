@@ -66,8 +66,16 @@ done
 
 # ---------------------------------------------------------------- root password
 if [ -n "${LIVE_PASS:-}" ]; then
-  hash=$("$OV/bin/busybox" mkpasswd -m sha-512 "$LIVE_PASS" 2>/dev/null || \
-         (have openssl && openssl passwd -6 "$LIVE_PASS" 2>/dev/null) || echo '')
+  # reproducible build me salt bhi deterministic chahiye (warna /etc/shadow har
+  # build me badalta hai aur payload sha256 match nahi karta)
+  if [ -n "${SOURCE_DATE_EPOCH:-}" ] && have sha256sum; then
+    dsalt=$(printf 'pk-live-%s' "$SOURCE_DATE_EPOCH" | sha256sum | cut -c1-16)
+    hash=$("$OV/bin/busybox" mkpasswd -m sha-512 -S "$dsalt" "$LIVE_PASS" 2>/dev/null || \
+           (have openssl && openssl passwd -6 -salt "$dsalt" "$LIVE_PASS" 2>/dev/null) || echo '')
+  else
+    hash=$("$OV/bin/busybox" mkpasswd -m sha-512 "$LIVE_PASS" 2>/dev/null || \
+           (have openssl && openssl passwd -6 "$LIVE_PASS" 2>/dev/null) || echo '')
+  fi
   if [ -n "$hash" ]; then
     if [ -f "$OV/etc/shadow" ]; then
       sed -i "1s|^\(root:\)[^:]*|\1$hash|" "$OV/etc/shadow"

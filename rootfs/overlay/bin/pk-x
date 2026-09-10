@@ -25,10 +25,27 @@ start() {
         [ -e "$d" ] && { mkdir -p "$RT$d"; mounted "$RT$d" || mount --bind "$d" "$RT$d" 2>/dev/null || true; }
       done
       mkdir -p "$RT/run/pk-x"; chmod 700 "$RT/run/pk-x"
-      say "weston (Wayland) tty7 par start - console switch: Ctrl+Alt+F7"
-      pk-chroot /bin/sh -c 'mkdir -p /run/pk-x; chmod 700 /run/pk-x; export XDG_RUNTIME_DIR=/run/pk-x; exec weston --socket=wayland-1 --renderer=gl 2>/dev/null || exec weston --backend=drm-backend.so --socket=wayland-1' >"$LOGF" 2>&1 &
+      say "weston (Wayland) start - console switch: Ctrl+Alt+F7"
+      pk-chroot /bin/sh -c 'mkdir -p /run/pk-x; chmod 700 /run/pk-x; export XDG_RUNTIME_DIR=/run/pk-x; exec weston --socket=wayland-1 --renderer=gl 2>/dev/null || exec weston --backend=drm-backend.so --socket=wayland-1 || exec weston --backend=headless --socket=wayland-1 || exec weston --backend=headless-backend.so --socket=wayland-1' >"$LOGF" 2>&1 &
       echo $! > "$PIDF"
-      printf 'WAYLAND_DISPLAY=wayland-1\nXDG_RUNTIME_DIR=%s\nDISPLAY=\n' "$RT/run/pk-x" > /run/pk/x-env
+      # socket ka wait: iske bina 'x-env' likh dena = jhootha success
+      j=0
+      while [ $j -lt 20 ]; do
+        [ -S "$RT/run/pk-x/wayland-1" ] && break
+        sleep 1; j=$((j + 1))
+      done
+      if [ -S "$RT/run/pk-x/wayland-1" ]; then
+        # clients chroot ke andar chalte hain -> in-chroot path hi do
+        printf 'WAYLAND_DISPLAY=wayland-1\nXDG_RUNTIME_DIR=/run/pk-x\nPK_XDG_RUNTIME_HOST=%s\nDISPLAY=\n' "$RT/run/pk-x" > /run/pk/x-env
+        say "weston ready (socket: $RT/run/pk-x/wayland-1, ${j}s)"
+      else
+        warn "weston ka socket nahi aaya (/dev/dri ya GL nahi?) -> $(tail -2 "$LOGF" 2>/dev/null | tr '\n' '|' | cut -c1-90)"
+        kill "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null || true
+        rm -f "$PIDF"
+        if rbin Xvfb; then say "fallback: Xvfb"; start Xvfb; return $?; fi
+        rm -f /run/pk/x-env
+        return 1
+      fi
       ;;
     Xorg)
       say "X11 server :0 (DRM/KMS) start"
@@ -37,10 +54,20 @@ start() {
       printf 'DISPLAY=:0\n' > "$ENVR"
       ;;
     Xvfb)
-      say "headless X11 (:0, 1280x800x24) - VNC ke liye: pk-x --vnc"
+      say "headless X11 (:0, 1280x800x24)"
       pk-chroot /bin/sh -c 'exec Xvfb :0 -screen 0 1280x800x24' >"$LOGF" 2>&1 &
       echo $! > "$PIDF"
-      printf 'DISPLAY=:0\n' > "$ENVR"
+      j=0
+      while [ $j -lt 20 ]; do
+        [ -e "$RT/tmp/.X11-unix/X0" ] && break
+        sleep 1; j=$((j + 1))
+      done
+      if [ -e "$RT/tmp/.X11-unix/X0" ]; then
+        printf 'DISPLAY=:0\n' > "$ENVR"
+        say "Xvfb ready (:0, ${j}s)"
+      else
+        warn "Xvfb ready nahi hua (tail $LOGF)"; rm -f "$ENVR"; return 1
+      fi
       ;;
     none|'')
       say "runtime me koi display server nahi (weston/Xorg/Xvfb). Install karo:"

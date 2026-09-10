@@ -26,12 +26,18 @@ if [ "$comp" = auto ]; then
 fi
 mkdir -p "$(dirname "$IMG")"
 rm -f "$IMG"
+# reproducible builds: SOURCE_DATE_EPOCH set ho to squashfs ke timestamps fix karo
+epochopt=""
+if [ -n "${SOURCE_DATE_EPOCH:-}" ] && mksquashfs -help 2>&1 | grep -q 'all-time'; then
+  epochopt="-all-time $SOURCE_DATE_EPOCH -mkfs-time $SOURCE_DATE_EPOCH"
+  log "  reproducible: squashfs timestamps = @$SOURCE_DATE_EPOCH"
+fi
 log "squashfs (-comp $comp, -all-root, 1MiB blocks)..."
-if ! mksquashfs "$OV" "$IMG" -comp "$comp" -b 1048576 -noappend -all-root \
+if ! mksquashfs "$OV" "$IMG" -comp "$comp" -b 1048576 -noappend -all-root $epochopt \
      > "$WORK/squashfs.log" 2>&1; then
   tail -3 "$WORK/squashfs.log" || true
   warn "$comp fail -> xz try"
-  mksquashfs "$OV" "$IMG" -comp xz -b 1048576 -noappend -all-root >> "$WORK/squashfs.log" 2>&1 \
+  mksquashfs "$OV" "$IMG" -comp xz -b 1048576 -noappend -all-root $epochopt >> "$WORK/squashfs.log" 2>&1 \
     || die "mksquashfs fail (log: $WORK/squashfs.log)"
 fi
 grep -E "Exportable|Total bytes read|Compression" "$WORK/squashfs.log" | head -4 | sed 's/^/    /'

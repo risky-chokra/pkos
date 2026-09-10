@@ -5,6 +5,7 @@ cat <<'TXT'
 pk's OS 1.0 - commands
 ----------------------
   pk-info        system report (boot mode, disk, net, modules)
+  pk-check       hardware + OS self-test (pendrive test!)  --save --gui --all
   pk-help        ye list
 
 apps (App Runtime - 'sudo make runtime' + WITH_RUNTIME=1 se ISO me, ya kisi
@@ -19,6 +20,12 @@ partition par pk-runtime.sqfs; phir boot par /opt/pk par apne aap mount)
   pk-runtime     start | stop | status | find | --setup <pk-runtime.sqfs> [dev]
   pk-chroot      runtime me koi command:  pk-chroot /usr/bin/htop
   pk-x           GUI: pk-x start weston | pk-x status | pk-x stop
+  pk-desktop     desktop session (weston -> Xvfb fallback) | pk-desktop app <x>
+  pk-keymap      keyboard layout (console + GUI):  pk-keymap in | uk | de
+  pk-wifi        Wi-Fi (experimental): status | scan | connect <ssid> <pw> | stop
+                 boot option: pk_wifi=<ssid>:<password>   (wpa_supplicant runtime me: pk-get install -y wpasupplicant iw)
+  pk-ios         iOS apps ka sach: why | info file.ipa | web <url> | mac-guest | darling
+  pk-android     Android: doctor | enable | install file.apk | kernel-frag
   pk-vm          guest VM (Windows / Android-x86 / macOS raasta):
                  pk-vm new win --size=40G | pk-vm run win --cdrom=x.iso | pk-vm list
 

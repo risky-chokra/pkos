@@ -1,0 +1,141 @@
+#!/bin/sh
+# pk's OS :: Wi-Fi (experimental) - base image me wpa_supplicant NAHI hota, isliye
+# ye tool App Runtime ke andar wala wpa_supplicant/iw use karta hai (ya host me ho to wo).
+#
+#   pk-wifi status                      interface/driver/firmware/rfkill ka haal
+#   pk-wifi scan [wlan0]                iw dev scan (iw chahiye)
+#   pk-wifi connect <ssid> [password]   connect + DHCP
+#   pk-wifi stop                        wpa_supplicant bandh karo
+#
+# boot option se (laptop jisme ethernet nahi): pk_wifi=<ssid>:<password>
+# QEMU/CI me wireless hardware nahi hota -> is tool ka sirf 'status' path automated
+# test me cover hota hai; connect real PC par hi test hoga.
+set -u
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+RT=${PK_RUNTIME_ROOT:-/opt/pk}
+IFACE=${PK_WIFI_IFACE:-}
+CONF=/run/pk/wpa.conf
+PIDF=/run/pk/wpa.pid
+LOGF=/run/pk/wifi.log
+have() { command -v "$1" >/dev/null 2>&1; }
+say()  { printf 'pk-wifi: %s\n' "$*"; }
+warn() { printf 'pk-wifi: %s\n' "$*" >&2; }
+mark() { ( printf '### PK: %s ###\n' "$*" > /dev/console ) 2>/dev/null; ( printf '%s\n' "$*" > /dev/kmsg ) 2>/dev/null; }
+runtime_ok() { grep -q " $RT " /proc/mounts 2>/dev/null && [ -d "$RT/usr" ]; }
+# tool host me hai ya runtime ke andar?
+tool() { # <name> -> "host" | "chroot" | ""
+  have "$1" && { printf 'host\n'; return 0; }
+  if runtime_ok; then
+    for d in /sbin /usr/sbin /bin /usr/bin; do
+      { [ -x "$RT$d/$1" ] || [ -e "$RT$d/$1" ] || [ -L "$RT$d/$1" ]; } && { printf 'chroot\n'; return 0; }
+    done
+  fi
+  printf '\n'; return 1
+}
+run_tool() { # <name> [args...]
+  what=$1; shift
+  t=$(tool "$what")
+  case "$t" in
+    host)   "$what" "$@" ;;
+    chroot) pk-chroot "$what" "$@" ;;
+    *)      warn "$what nahi mila (host ya runtime me) ->  pk-get install -y wpasupplicant iw"; return 127 ;;
+  esac
+}
+
+pick_iface() {
+  [ -n "$IFACE" ] && return 0
+  for w in /sys/class/net/*; do
+    [ -e "$w/wireless" ] || [ -e "$w/phy80211" ] || continue
+    IFACE=${w##*/}; return 0
+  done
+  for w in /sys/class/net/wlan* /sys/class/net/wifi* /sys/class/net/ath*; do
+    [ -e "$w" ] && { IFACE=${w##*/}; return 0; }
+  done
+  return 1
+}
+
+do_status() {
+  printf 'pk-wifi status\n'
+  if pick_iface; then
+    printf '  iface     : %s\n' "$IFACE"
+    printf '  state     : %s\n' "$(cat "/sys/class/net/$IFACE/operstate" 2>/dev/null || echo '?')"
+    drv=$(readlink "/sys/class/net/$IFACE/device/driver" 2>/dev/null); printf '  driver    : %s\n' "${drv##*/}"
+  else
+    printf '  iface     : koi wireless interface nahi (ethernet-only machine?)\n'
+  fi
+  printf '  rfkill      : '
+  if have rfkill; then rfkill list wifi 2>/dev/null | head -2 | tr '\n' ' '; else printf '(rfkill nahi)\n'; fi
+  printf '\n  wpa_supplicant host : '; have wpa_supplicant && printf 'haan\n' || printf 'nahi\n'
+  if runtime_ok; then
+    printf '  wpa_supplicant runtime : '; tool wpa_supplicant >/dev/null 2>&1 && printf 'haan\n' || printf 'nahi -> pk-get install -y wpasupplicant iw\n'
+    printf '  iw                     : '; tool iw >/dev/null 2>&1 && printf 'haan\n' || printf 'nahi\n'
+  else
+    printf '  runtime   : nahi laga (pk-runtime start) - wpa_supplicant usually wahin se aayega\n'
+  fi
+  fw=$(ls /lib/firmware 2>/dev/null | wc -l)
+  printf '  firmware  : /lib/firmware me %s entries (ISO build me PK_FIRMWARE=1 se bhi bhar sakte ho)\n' "${fw:-0}"
+  mark "WIFI-STATUS-OK"
+  return 0
+}
+
+do_scan() {
+  pick_iface || { warn "wireless iface nahi mila"; return 1; }
+  [ -n "${1:-}" ] && IFACE=$1
+  tool iw >/dev/null 2>&1 || { warn "iw nahi (pk-get install -y iw)"; return 70; }
+  say "scan ($IFACE)..."
+  run_tool iw dev "$IFACE" scan 2>/dev/null | awk '/^BSS /{bss=$2} /ssid /{s=$0; sub(/.*ssid: /,"",s)} /signal/{printf "  %s  %s\n", $0, s}' | head -25
+}
+
+do_connect() {
+  ssid=${1:-}; pw=${2:-}
+  [ -n "$ssid" ] || { echo "usage: pk-wifi connect <ssid> [password]"; return 1; }
+  pick_iface || { warn "wireless iface nahi mila"; mark "WIFI-FAIL (no iface)"; return 1; }
+  tool wpa_supplicant >/dev/null 2>&1 || {
+    warn "wpa_supplicant nahi mila"
+    warn "  runtime ke andar:  pk-get install -y wpasupplicant iw"
+    warn "  (base image me jaan-boojh ke nahi hai - size ke liye)"
+    mark "WIFI-FAIL (no wpa_supplicant)"; return 70; }
+  mkdir -p /run/pk 2>/dev/null
+  {
+    printf 'ctrl_interface=/run/pk/wpad\nupdate_config=1\ncountry=IN\n\nnetwork={\n  ssid="%s"\n' "$ssid"
+    if [ -n "$pw" ]; then printf '  psk="%s"\n' "$pw"; else printf '  key_mgmt=NONE\n'; fi
+    printf '}\n'
+  } > "$CONF" 2>/dev/null || { warn "$CONF likha nahi gaya"; return 1; }
+  mkdir -p /run/pk/wpad 2>/dev/null
+  [ -f "$PIDF" ] && kill "$(cat "$PIDF")" 2>/dev/null
+  say "wpa_supplicant start ($IFACE, ssid=$ssid)"
+  run_tool wpa_supplicant -B -i "$IFACE" -c "$CONF" -P "$PIDF" -t >"$LOGF" 2>&1 &
+  sleep 3
+  j=0
+  while [ $j -lt 25 ]; do
+    st=$(cat "/sys/class/net/$IFACE/operstate" 2>/dev/null)
+    [ "$st" = up ] && break
+    sleep 1; j=$((j + 1))
+  done
+  if [ "$(cat "/sys/class/net/$IFACE/operstate" 2>/dev/null)" = up ]; then
+    say "link up ($IFACE, ${j}s) -> DHCP le rahe hain"
+    if [ -x /sbin/pk-net ]; then pk-net dhcp; else udhcpc -i "$IFACE" -R -q 2>/dev/null; fi
+    ip=$(ip -4 addr show "$IFACE" 2>/dev/null | awk '/inet /{print $2; exit}')
+    if [ -n "$ip" ]; then say "IP: $ip ✓"; mark "WIFI-OK ($ssid, $ip)"; return 0; fi
+    warn "link up par IP nahi mila (pk-net dhcp dobara)"; mark "WIFI-LINK-NO-IP ($ssid)"; return 1
+  fi
+  warn "associate nahi hua (${j}s) - password/SSID check karo; log: $LOGF"
+  tail -4 "$LOGF" 2>/dev/null | sed 's/^/  /'
+  mark "WIFI-FAIL (associate: $ssid)"
+  return 1
+}
+
+do_stop() {
+  [ -f "$PIDF" ] && kill "$(cat "$PIDF")" 2>/dev/null && say "wpa_supplicant band"
+  rm -f "$PIDF" 2>/dev/null
+  return 0
+}
+
+case "${1:-status}" in
+  status) shift 2>/dev/null || true; do_status ;;
+  scan)   shift; do_scan "${1:-}" ;;
+  connect) shift; do_connect "${1:-}" "${2:-}" ;;
+  stop)   do_stop ;;
+  --help|-h) sed -n '2,13p' "$0" ;;
+  *) warn "unknown: $1 (pk-wifi --help)"; exit 1 ;;
+esac

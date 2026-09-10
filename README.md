@@ -38,8 +38,13 @@ sudo apt-get install -y qemu-system-x86 ovmf
 git clone <repo> pkos && cd pkos
 make doctor        # sab tools hai? version check
 make iso           # -> build/pkos.iso   (~1-2 min)
-make test          # emulator me 7-stage QA (live · install · installed-boot · toram ·
-                   #   UEFI · persistence+net+ssh · app runtime)  ~10 min
+make test          # emulator me 8-stage QA (live · install · installed-boot · toram ·
+                   #   UEFI · persistence+net+ssh · app runtime · pendrive kit)  ~15 min
+make check         # sirf stage 8 (pk-check + keymap + install user/runtime copy)
+make gui-test      # stage 8 + desktop session (weston/Xvfb + xterm round-trip)
+make apps-iso      # base ISO + App Runtime andar -> build/pkos-apps.iso
+make manifest      # build/manifest.txt (payload hashes) ; make verify = uska check
+make bundle        # git bundle + source tar (sandbox/PC transfer ke liye)
 make run           # QEMU me live session (serial/stdio)
 ```
 
@@ -198,8 +203,11 @@ scripts/run-test.sh      6-stage emulator QA (live → install → installed boo
 scripts/doctor.sh        toolchain check
 rootfs/overlay/          OS ke config + scripts (pk-boot, pk-install, inittab, …)
 tools/write-usb.sh       dd to USB, safety checks ke saath
+tools/verify-usb.sh      pendrive/ISO ka content manifest se verify (rebuild check)
+tools/restore-from-iso.sh workspace/git reset me rootfs/overlay udd jaaye to ISO se restore
+scripts/manifest.sh      ISO ke payload files ke sha256 (build/manifest.txt)
 tools/gen-shadow-hash    sha-512 root hash banao (etc/shadow ke liye)
-docs/                    BUILD · REAL-PC · PERSISTENCE · APPS · KERNEL · TROUBLE
+docs/                    BUILD · PENDRIVE · REAL-PC · PERSISTENCE · APPS · IOS-ANDROID · KERNEL · TROUBLE
 ```
 
 Aur details:
@@ -236,6 +244,29 @@ pk-shell                          # runtime ke andar shell        pk-x start wes
 
 Poora doc (runtime kaise banane/kahaan rakhane kare, persistence, GUI, `pk_apps_get=`, QA
 modes, troubleshooting): **[docs/APPS.md](docs/APPS.md)**
+
+### 5c. Pendrive/real-PC kit (live system ke andar)
+
+```sh
+pk-check --save      # hardware + OS self-test: net, USB speed, disks, DRM/KMS, SecureBoot,
+                     # runtime, wine, dmesg errors... report: /run/pk/check.txt
+pk-check --gui       # desktop bhi utha ke X-client round-trip check
+pk-desktop           # weston (KMS) -> Xorg -> Xvfb fallback, + xterm welcome
+pk-desktop app htop  # koi GUI app session me kholo
+pk-keymap in         # console (loadkmap) + GUI (setxkbmap) layout
+pk-ios why|info file.ipa|web <url>|mac-guest|darling   # iOS ki sachchai + 3 raaste
+pk-android doctor|enable|install x.apk|kernel-frag      # Android (binderfs) ka haal
+```
+
+Boot options (GRUB me `e`, ya menu entries `g`/`k`): `pk_check=1` (ya `pk_check=gui`),
+`pk_desktop=1`, `pk_keymap=<layout>`, `pk_install_user=<name> pk_install_userpw=<pw>`.
+
+| doc | kis liye |
+|---|---|
+| [docs/PENDRIVE.md](docs/PENDRIVE.md) | **aapke real pendrive test ka sheet** (kya karna hai, kaunsi line pass mani jaayegi, kya bhejna hai) |
+| [docs/IOS-ANDROID.md](docs/IOS-ANDROID.md) | iOS/Android: kya chalta hai, kyun nahi chalta, kaunse raaste actually kaam karte hain |
+| [docs/APPS.md](docs/APPS.md) | App Runtime (Debian userland + apt + Wine) |
+| [docs/TROUBLE.md](docs/TROUBLE.md) | markers se debugging |
 
 ## 6. Kaise kaam karta hai (2 min ka tour)
 

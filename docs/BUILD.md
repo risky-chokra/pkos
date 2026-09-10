@@ -112,6 +112,11 @@ ke saath `-publish_date` fix karo.
 ```sh
 make test                      # 7 stages, ~10 min (TCG emulation, 640 MB VM)
 make test-apps                 # sirf stage 7 (apps layer), ~30 s
+make check                     # sirf stage 8 (pendrive kit)
+make gui-test                  # stage 8 + desktop/X client round-trip
+make manifest                  # build/manifest.txt = payload sha256 (rebuild verify)
+make iso REPRODUCIBLE=1        # SOURCE_DATE_EPOCH se squashfs+initrd byte-stable
+make bundle                    # git bundle + src tar (machine-to-machine transfer)
 make test-live                 # sirf stage 1 (fast smoke test)
 PK_TEST_STAGES=2,3 make test  # install + installed boot
 PK_TEST_TIMEOUT=400 make test # slow machine pe
@@ -121,6 +126,10 @@ cat build/test-logs/*.log        # har VM ka serial output
 Stages: (1) live boot from ISO (grub) · (2) headless install → disk image ·
 (3) us disk ka apna GRUB se boot + installed-mode policy checks · (4) `toram` ·
 (5) UEFI/OVMF · (6) `persistent` disk + `pk_net=dhcp` + `pk_ssh=on` ·
+(8) **Pendrive kit** (kit ISO jisme runtime andar; `pk-check` 0 FAIL, `pk-keymap`,
+headless install with `--user` + runtime copy, phir installed boot par
+`/var/lib/pk` se rw-image attach) · `make gui-test` se stage 8 + desktop session
+(weston → Xvfb fallback + `xterm`/`xdpyinfo` round-trip) ·
 (7) **App Runtime** (runtime disk se `/opt/pk` attach + `pk-run` dispatch battery +
 doosri boot par re-attach + host side `pk-runtime-rw.img` ke andar installed app verify)
 (stage 6 do baar boot karta hai: marker file persist image me likhti hai, dusri

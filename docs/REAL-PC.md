@@ -58,6 +58,12 @@ sync
    - `(live: toram - image RAM me copy karo)` — media nikaal sakte ho
    - `(live: persistent - USB ke PK-PERSIST part pe save)` — changes USB par
    - `(live: network + SSH chalu)` — `pk_net=dhcp pk_ssh=on`
+   - `(live: desktop + apps GUI)` — `pk_desktop=1 pk_net=dhcp` (weston → Xvfb fallback)
+   - `(live: pendrive hardware check)` — `pk_check=1 pk_net=dhcp` → boot hote hi `pk-check`
+     (net, USB speed, disks, DRM, KVM, SecureBoot, runtime, wine, dmesg) + report
+     `/run/pk/check.txt`. `pk_check=gui` se desktop bhi test hota hai.
+   - install ke saath user: `pk_install_user=ramesh pk_install_userpw=<pw>`
+     (runtime bhi installed system me copy ho jaati hai → `/var/lib/pk`)
    - `(live: app runtime + network)` — `pk_runtime=auto pk_net=dhcp` (runtime ISO me
      `WITH_RUNTIME=1` se daala ho ya kisi partition par `pk-runtime.sqfs` rakho;
      apps + `pk_apps_get=<pkg>` ke liye **docs/APPS.md**)

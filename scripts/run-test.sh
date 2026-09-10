@@ -467,11 +467,17 @@ stage "8/8  pendrive kit: pk-check + keymap + install (user + runtime) + install
   rm -f "$KITDISK"
   dd if=/dev/zero of="$KITDISK" bs=1M count="$DISKMB" status=none conv=sparse
 
+  A8="console=ttyS0 loglevel=4 pk_media=/dev/vda pk_install=/dev/vdb pk_silent pk_selftest pk_rootpw=$TESTPW pk_install_user=kituser pk_install_userpw=$TESTPW pk_check=1 pk_keymap=us pk_net=dhcp"
+  if [ "${PK_TEST_GUI:-0}" = 1 ]; then
+    A8="$A8 pk_desktop=1 pk_check=gui"
+    KTMO=$(( KTMO + 300 ))
+    note "GUI mode: desktop session (weston -> Xvfb fallback) + X client round-trip bhi check"
+  fi
   note "boot A: kit ISO -> pk-check, pk-keymap, headless install (--user + runtime copy)"
   run_vm "$LOGDIR/08a-kit.log" "$KTMO" \
     -drive "file=$KISO,if=virtio,readonly=on" -drive "file=$KITDISK,if=virtio" \
     -kernel "$RK" -initrd "$RI" \
-    -append "console=ttyS0 loglevel=4 pk_media=/dev/vda pk_install=/dev/vdb pk_silent pk_selftest pk_rootpw=$TESTPW pk_install_user=kituser pk_install_userpw=$TESTPW pk_check=1 pk_keymap=us pk_net=dhcp"
+    -append "$A8"
   L=$LOGDIR/08a-kit.log
   check "$L" 'PK: BOOT-OK mode=live'  "kit ISO ka live boot"
   check "$L" 'PK: RUNTIME-OK'         "runtime ISO ke andar se /opt/pk par attach hua"
@@ -480,6 +486,17 @@ stage "8/8  pendrive kit: pk-check + keymap + install (user + runtime) + install
   check "$L" 'PK: NET-OK'             "kit ke saath bhi DHCP"
   check "$L" 'PK: INSTALL-OK'          "install (user + runtime copy ke saath) pura hua"
   check "$L" 'PK: INSTALL-DONE rc=0'   "installer ka rc 0 (autoinstall hook)"
+  if [ "${PK_TEST_GUI:-0}" = 1 ]; then
+    check "$L" 'PK: DESKTOP-OK'       "pk-desktop: session utha (weston ya Xvfb fallback)"
+    check "$L" 'PK: GUI-X-OK'         "pk-check --gui: display mil gaya"
+    check "$L" 'PK: GUI-APP-OK'       "GUI client (xterm ya weston-terminal) session me chala"
+    if grep -q 'GUI-XCLIENT-OK' "$L" 2>/dev/null; then
+      pass "X client (xdpyinfo) ne bhi display use kiya"
+      total=$((total + 1))
+    else
+      note "  (xdpyinfo row skip - Wayland-only session; GUI-APP-OK hi asli proof hai)"
+    fi
+  fi
   if grep -q 'CHECK-SUMMARY' "$L" 2>/dev/null; then
     note "pk-check: $(grep -o 'CHECK-SUMMARY[^#]*' "$L" | head -1 | tr -d '\r')"
   else

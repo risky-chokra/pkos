@@ -72,13 +72,27 @@ done
     "$MODE" "$(uname -r)" "$(cat /run/pk/media 2>/dev/null || cat /run/pk/rootdev 2>/dev/null || echo installed?)"
 } > /dev/console 2>/dev/null || true
 
+# Wi-Fi (experimental): pk_wifi=<ssid>:<password>  (ethernet na ho to laptop ke liye)
+WSPEC=$(tr ' ' '\n' < /proc/cmdline 2>/dev/null | sed -n 's/^pk_wifi=//p' | head -1)
+if [ -n "${WSPEC:-}" ] && command -v pk-wifi >/dev/null 2>&1; then
+  wssid=${WSPEC%%:*}; wpw=${WSPEC#*:}
+  [ "$wpw" = "$WSPEC" ] && wpw=""
+  ip0=$(ip -4 addr show 2>/dev/null | awk '/inet /{if($2!~/^127\./){print $2; exit}}')
+  if [ -n "${ip0:-}" ]; then
+    say "pk_wifi: pehle se IP hai ($ip0) - wifi skip"
+  else
+    say "pk_wifi: '$wssid' se connect try (experimental)"
+    pk-wifi connect "$wssid" "$wpw" > /run/pk/wifi-boot.log 2>&1 || say "  wifi fail - detail: /run/pk/wifi-boot.log"
+  fi
+fi
+
 # keymap (console + GUI) - pk_keymap=in
 KMAP=$(tr ' ' '\n' < /proc/cmdline 2>/dev/null | sed -n 's/^pk_keymap=//p' | head -1)
 if [ -n "${KMAP:-}" ] && (command -v pk-keymap >/dev/null 2>&1); then
   pk-keymap "$KMAP" >/dev/null 2>&1 && say "keymap: $KMAP" || say "keymap '$KMAP' poora set nahi hua"
 fi
 # pendrive hardware check (real PC test ke liye) - pk_check=1
-if has pk_check=1 || has pk_check=on; then
+if has pk_check=1 || has pk_check=on || has pk_check=gui; then
   # runtime attach (S50runtime hook) background me hota hai -> thora wait, taaki
   # report me runtime/apps wali lines khali na aayein
   jw=0
@@ -86,16 +100,23 @@ if has pk_check=1 || has pk_check=on; then
     grep -q ' /opt/pk ' /proc/mounts 2>/dev/null && break
     sleep 1; jw=$((jw + 1))
   done
-  say "pk-check chal raha hai (runtime wait ${jw}s; report: /run/pk/check.txt)"
-  pk-check --save --verbose > /run/pk/check.out 2>&1
+  ckargs="--save --verbose"
+  if has pk_check=gui; then ckargs="$ckargs --gui"; fi
+  say "pk-check chal raha hai (runtime wait ${jw}s; args: $ckargs)"
+  pk-check $ckargs > /run/pk/check.out 2>&1
+  fr=$(grep '^\[FAIL\]' /run/pk/check.out 2>/dev/null | tr '\n' '|' | cut -c1-180)
+  [ -n "${fr:-}" ] && printf '### PK: CHECK-ROWS %s ###\n' "$fr" > /dev/console
   say "pk-check done (rc=$?) - poori report: less /run/pk/check.txt"
 fi
 # desktop session (apps+wala ISO real PC pe kholne ke liye) - pk_desktop=1
 if has pk_desktop=1 || has pk_desktop=on; then
-  say "pk-desktop start (weston/Xvfb; detail /run/pk/x.log)"
+  say "pk-desktop start (weston/Xvfb; detail /run/pk/desktop.log)"
   pk-desktop start >/run/pk/desktop.log 2>&1 || say "pk-desktop fail (log: /run/pk/desktop.log)"
+  if has pk_check=1 || has pk_check=on || has pk_check=gui; then
+    say "desktop ke baad dobara: pk-check --gui"
+    pk-check --save --gui > /run/pk/check2.out 2>&1
+  fi
 fi
-
 # ------------------------------------------------------------------ autoinstall (grub menu se)
 if [ -f /run/pk/boot.env ]; then
   . /run/pk/boot.env
