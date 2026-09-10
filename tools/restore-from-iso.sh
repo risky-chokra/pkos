@@ -75,6 +75,13 @@ for f in $(find "$OV" -type f \( -name 'pk-*' -o -name 'S[0-9]*' -o -name 'defau
 done
 if [ ! -d "$PK_ROOT/.git" ]; then
   echo "[pk warn] .git nahi mila - history reset me gayab. Naya repo: git init -b main && git add -A && git commit -m 'restore'"
+  echo "[pk warn] ...ya better: git clone https://github.com/risky-chokra/pkos.git (ya release ka pkos-1.0.bundle)"
+elif ! git -C "$PK_ROOT" remote get-url origin >/dev/null 2>&1; then
+  # snapshot me .git/config persist nahi hota -> remote/identity udd jaate hain
+  echo "[pk warn] .git/config me 'origin' nahi hai (config snapshots me persist nahi hota). Restore:"
+  echo "    git -C $PK_ROOT remote add origin https://github.com/risky-chokra/pkos.git"
+  echo "    git -C $PK_ROOT config --local user.name  "<naam>""
+  echo "    git -C $PK_ROOT config --local user.email "<email>""
 fi
 [ "$bad" = 0 ] && echo "[pk] sh -n clean ✓  ab: make doctor && make iso"
 exit $bad
