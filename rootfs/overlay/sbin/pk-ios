@@ -45,7 +45,25 @@ plist_get() { # <file> <key>
   else
     awk -v k="$k" '
       index($0, "<key>" k "</key>") { f=1; next }
-      f { line=$0; gsub(/^[ \t]*<string>|<\/string>[ \t]*$/, "", line); gsub(/[ \t]/, "", line); if (line != "") { print line; exit } }
+      f {
+        line=$0
+        gsub(/^[ \t]+|[ \t]+$/, "", line)
+        if (line ~ /^<array>/ || line ~ /<array>/) {   # <array> ke andar values
+          buf=line; got=0
+          while (buf !~ /<\/array>/ && (getline nxt) > 0) {
+            buf = buf " " nxt
+            if (nxt ~ /<\/array>/) { got=1; break }
+          }
+          sub(/^[^>]*<array>/, " ", buf)
+          gsub(/<[^>]*>|[ \t]+/, " ", buf)
+          gsub(/^[ ]+|[ ]+$|, /, "", buf)
+          gsub(/  +/, " ", buf)
+          if (buf != "") { print buf; exit }
+          next
+        }
+        sub(/^[ \t]*<string>[ \t]*/, "", line); sub(/[ \t]*<\/string>[ \t]*$/, "", line)
+        if (line != "" && line !~ /^</) { print line; exit }
+      }
     ' "$f" 2>/dev/null | head -1
   fi
 }
@@ -55,22 +73,24 @@ macho_arch() { # <file>
   f=$1
   [ -f "$f" ] || return 1
   m=$(od -An -tx1 -N4 "$f" 2>/dev/null | tr -d ' \n')
+  pre=''
   case "$m" in
-    feedfacf|cffaedf) ct=$(od -An -tx1 -j4 -N4 "$f" 2>/dev/null | tr -d ' \n') ;;
-    cafebabe|bebafeca)
-      # fat binary: pehle entry ka cputype 8 bytes baad
+    feedfacf*|cffaedfe*|feedface*|cefaedfe*)
+      ct=$(od -An -tx1 -j4 -N4 "$f" 2>/dev/null | tr -d ' \n') ;;
+    cafebabe*|bebafeca*)
+      # fat binary: nfat_HDR ke baad pehli entry ka cputype (offset 12)
       ct=$(od -An -tx1 -j12 -N4 "$f" 2>/dev/null | tr -d ' \n')
-      printf 'universal/'
-      ;;
-    cffaedf) ct=0c000001 ;;
+      pre='universal/' ;;
     *) return 1 ;;
   esac
   case "$ct" in
-    0c000001|0100000c) printf 'arm64\n' ;;
-    0c800001|0100800c) printf 'arm64e\n' ;;
-    07000001|01000007) printf 'armv7\n' ;;
-    0700000c) printf 'x86_64\n' ;;
-    *) printf 'arch:%s\n' "${ct:-?}" ;;
+    0c000001|0100000c) printf '%sarm64\n' "$pre" ;;
+    0c800001|0100800c) printf '%sarm64e\n' "$pre" ;;
+    07000001|01000007) printf '%sarmv7\n' "$pre" ;;
+    0700000c|0c000007) printf '%sx86_64\n' "$pre" ;;
+    01000006|06000001) printf '%si386/x86\n' "$pre" ;;
+    0200000c|0c000002) printf '%sarm64_32 (watch)\n' "$pre" ;;
+    *) printf '%sarch:%s\n' "$pre" "${ct:-?}" ;;
   esac
 }
 
