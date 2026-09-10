@@ -28,9 +28,21 @@ mkdir -p "$(dirname "$IMG")"
 rm -f "$IMG"
 # reproducible builds: SOURCE_DATE_EPOCH set ho to squashfs ke timestamps fix karo
 epochopt=""
-if [ -n "${SOURCE_DATE_EPOCH:-}" ] && mksquashfs -help 2>&1 | grep -q 'all-time'; then
-  epochopt="-all-time $SOURCE_DATE_EPOCH -mkfs-time $SOURCE_DATE_EPOCH"
-  log "  reproducible: squashfs timestamps = @$SOURCE_DATE_EPOCH"
+if [ -n "${SOURCE_DATE_EPOCH:-}" ]; then
+  # squashfs-tools 4.4+ SOURCE_DATE_EPOCH ko KHUD honor karta hai; -mkfs-time bhi
+  # do to "can't be used at the same time" se fatal -> version dekh ke hi flag do
+  ver=$( { mksquashfs -version 2>/dev/null; mksquashfs --version 2>/dev/null; } \
+         | sed -n 's/.*version \([0-9]*\.[0-9]*\).*$/\1/p' | head -1)
+  case "$ver" in
+    4.[4-9]*|4.1[0-9]*|5.*)  log "  reproducible: mksquashfs $ver SOURCE_DATE_EPOCH khud use karta hai" ;;
+    "")                      log "  reproducible: version parse nahi hui - env hi kaam karega" ;;
+    *)   if mksquashfs -help 2>&1 | grep -q 'all-time'; then
+           epochopt="-all-time $SOURCE_DATE_EPOCH -mkfs-time $SOURCE_DATE_EPOCH"
+           log "  reproducible: -all-time/-mkfs-time = @$SOURCE_DATE_EPOCH (mksquashfs $ver)"
+         else
+           warn "  mksquashfs $ver me timestamp fix karne ka option nahi -> payload reproducible nahi hoga"
+         fi ;;
+  esac
 fi
 log "squashfs (-comp $comp, -all-root, 1MiB blocks)..."
 if ! mksquashfs "$OV" "$IMG" -comp "$comp" -b 1048576 -noappend -all-root $epochopt \

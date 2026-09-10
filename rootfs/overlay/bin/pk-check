@@ -50,11 +50,13 @@ mounted() { grep -q " $1 " /proc/mounts 2>/dev/null; }
 # ------------------------------------------------------------------ system
 row info system "$(uname -s) $(uname -r) $(uname -m) | $(cat /etc/os-release 2>/dev/null | sed -n 's/^PRETTY_NAME=//p' | tr -d '"')"
 
-mode=$(sed -n 's/^\(.*\) mode=\(live\|installed\|toram\).*/\2/p' /run/pk/boot.env 2>/dev/null | head -1)
-[ -n "$mode" ] || mode=$(awk -F'mode=' '/PK_BOOT_MODE/{print $2}' /run/pk/boot.env 2>/dev/null | head -1)
-[ -n "$mode" ] || mode=$(grep -o 'mode=[a-z]*' /run/pk/boot.env 2>/dev/null | head -1 | cut -d= -f2)
-[ -n "$mode" ] || mode='(unknown)'
-row ok boot "mode=$mode"
+mode=$(cat /run/pk/mode 2>/dev/null)
+[ -n "$mode" ] || mode=$(sed -n 's/^BOOTMODE=//p' /run/pk/boot.env 2>/dev/null | head -1)
+if [ -n "$mode" ]; then
+  row ok boot "mode=$mode  media=$(cat /run/pk/media 2>/dev/null || echo '?')"
+else
+  row warn boot "/run/pk/mode nahi mila (pk-boot chala? init: $(cat /proc/1/comm 2>/dev/null))"
+fi
 if [ -r /run/pk/boot.env ]; then row ok bootenv "$(tr '\n' ' ' < /run/pk/boot.env | cut -c1-120)"; else row warn bootenv "/run/pk/boot.env nahi mila (pk-boot chala?)"; fi
 
 # root writable? (overlay upper)
@@ -101,7 +103,7 @@ for d in /sys/block/*; do
   n=${d##*/}
   case "$n" in loop*|ram*|zram*) continue ;; esac
   szb=$(cat "$d/size" 2>/dev/null || echo 0)
-  gb=$(( szb / 2048 / 512 ))
+  gb=$(( szb / 2097152 ))   # 512-byte sectors -> GiB
   ro=''
   [ -w "/dev/$n" ] || ro=' (ro)'
   disks="$disks $n=${gb}G$ro"
@@ -109,7 +111,7 @@ done
 row info disks "${disks:- koi block dev nahi}"
 if [ "$DOSPEED" = 1 ]; then
   t=/var/tmp/pk-speed.$$
-  s=$( ( dd if=/dev/zero of="$t" bs=1M count=64 conv=fsync 2>&1 | tail -1 ) 2>/dev/null )
+  s=$( ( dd if=/dev/zero of="$t" bs=1M count=64 2>&1; sync ) 2>/dev/null | tail -2 | tr '\n' ' ' )
   rm -f "$t" 2>/dev/null
   rate=$(printf '%s' "$s" | sed -n 's/.* \([0-9.]*\) [MG]B.s.*/\1/p' | head -1)
   unit=$(printf '%s' "$s" | sed -n 's/.*[0-9.]* \([MG]\)B.s.*/\1/p' | head -1)
@@ -127,12 +129,17 @@ if [ "$DOGUI" = 1 ]; then
                { [ -x "$d/$1" ] || [ -e "$d/$1" ] || [ -L "$d/$1" ]; } && return 0
              done; return 1; }
   if command -v pk-x >/dev/null 2>&1; then
-    pk-x start > /run/pk/gui-start.log 2>&1
+    sess_prev=0
+    if [ -r /run/pk/x-env ] && { [ -e "$RT/run/pk-x/wayland-1" ] || [ -e "$RT/tmp/.X11-unix/X0" ] || [ -e /tmp/.X11-unix/X0 ]; }; then
+      sess_prev=1
+    else
+      pk-x start > /run/pk/gui-start.log 2>&1
+    fi
     rc=$?
     [ -r /run/pk/x-env ] && . /run/pk/x-env
     if [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
       ( printf '### PK: GUI-X-OK (%s) ###\n' "${DISPLAY:-${WAYLAND_DISPLAY:-wayland}}" > /dev/console ) 2>/dev/null
-      row ok display "pk-x start ok: DISPLAY=${DISPLAY:-none} WAYLAND=${WAYLAND_DISPLAY:-none} (rc=$rc)"
+      row ok display "DISPLAY=${DISPLAY:-none} WAYLAND=${WAYLAND_DISPLAY:-none} (rc=$rc${sess_prev:+, session pehle se tha})"
       # weston ke andar XWayland ho to :0 pe X clients chal sakte hain
       xd=${DISPLAY:-}
       if [ -z "$xd" ] && [ -e "$RT/tmp/.X11-unix/X0" ]; then xd=":0"; row info xwayland "XWayland socket mila ($RT/tmp/.X11-unix/X0)"; fi
@@ -217,7 +224,7 @@ fi
 # wifi
 wdev=''
 for w in /sys/class/net/*; do
-  case "$w" in */wireless|*/phy80211*) : ;; *) continue ;; esac
+  [ -e "$w/wireless" ] || [ -e "$w/phy80211" ] || continue
   wdev="$wdev ${w##*/}"
 done
 fw=''
@@ -253,7 +260,12 @@ else
 fi
 if [ "$DOAPPS" = 1 ] && [ -x /sbin/pk-run ]; then
   out=$(pk-run --selftest 2>&1 | tr '\n' '|' | cut -c1-140)
-  row ok appbattery "pk-run --selftest: ${out:-(<output console/kmsg par>)}"
+  arc=$?
+  if [ "$arc" = 0 ]; then
+    row ok appbattery "pk-run --selftest pass: ${out:-(markers console/kmsg par)}"
+  else
+    row fail appbattery "pk-run --selftest rc=$arc: ${out:-(<khaali>)}"
+  fi
 fi
 
 # ------------------------------------------------------------------ iOS / Android

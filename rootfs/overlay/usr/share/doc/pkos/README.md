@@ -43,13 +43,41 @@ host PC par `sudo make runtime` (details: repo ke docs/APPS.md me).
 - live boot = auto-login (koi password nahi). Prompt dikhe to: `root` / `pk`
 - installed boot = login chahiye (password installer me set kiya tha; default `pk`)
 
+## Pendrive / hardware test (ek command me)
+    pk-check --save          # net, USB speed, disks, DRM/KMS, KVM, SecureBoot, runtime,
+                             # wine, dmesg errors...  report: /run/pk/check.txt
+    pk-check --gui           # desktop utha ke X client round-trip bhi test
+    pk-check --all           # sab (verbose + save + apps battery + speed)
+    pk-run --selftest        # app dispatch battery (ELF/.deb/.exe/AppImage/jar/rpm/iOS/apk)
+  Kuch FAIL dikhe to /run/pk/check.txt + `dmesg | grep PK` hi kaafi hai debug ke liye.
+
+## GUI
+    pk-desktop               # weston (KMS) -> na ho to Xvfb fallback, + terminal
+    pk-desktop app htop      # koi GUI app session me
+    pk-x status              # display server ka haal (log: /run/pk/x.log)
+    pk-get install -y weston xterm xvfb x11-utils   # runtime me GUI tools
+
+## iOS / Android apps (sach + raaste)
+    pk-ios why               # iOS app Linux par native kyun nahi chalti (Mach-O + UIKit)
+    pk-ios info ./App.ipa    # .ipa kholke: bundle id, arch, min iOS
+    pk-ios web https://...   # iOS-only *service* ko desktop launcher bana do
+    pk-ios mac-guest         # QEMU macOS guest + Xcode iOS Simulator ka recipe
+    pk-android doctor        # .apk ke liye binderfs/waydroid ka haal
+    pk-android kernel-frag   # apne kernel me ye config lines daalo
+
 ## Keyboard / console font
-    loadkmap < /path/to/map.kmap        # keymap
-    pk-info                          # system report
+    pk-keymap in             # layout: console (loadkmap) + GUI (setxkbmap)
+                             # (console maps builder ke /usr/share/keymaps se aate hain;
+                             #  na ho to GUI wala hissa hi chalega)
+    loadkmap < /path/to/map.kmap        # manually bhi kar sakte ho
+    pk-info                  # system report
 
 ## Disk pe install
     pk-install --info                # kaunsi disk milegi (kuch nahi chheda)
     pk-install                         # interactive (confirm maangega)
     pk-install --target=/dev/sda --yes # headless (test/automation)
+    pk-install --target=auto --user=ramesh --user-password=Secret   # user + home bhi
+    # app runtime installed system me copy ho jaati hai (/var/lib/pk) + uski rw image,
+    # isliye installed boot par bhi apps + apt + persistence chalti hain
 
 Layouts: `--layout=hybrid` (default: GPT + BIOS + UEFI), `--layout=efi`, `--layout=bios`.

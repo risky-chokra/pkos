@@ -115,7 +115,8 @@ Booting: reset → boot menu (`F12` / `F8` / `Esc` / `F2`) → USB select karo.
 **Secure Boot OFF karo** — pk's OS self-built hai, signed nahi.
 GRUB menu me 9 options (hotkey bracket me): `live` [l], `toram` [t],
 `persistent` [p], `network + SSH` [n], `install to internal disk` [i],
-`install: headless` [a], `debug` [d], `serial console` [c], `single user` [s].
+`install: headless` [a], `debug` [d], `serial console` [c], `single user` [s],
+`desktop + apps` [g], `pendrive hardware check` [k].
 `e` dabakar kisi bhi entry me kernel cmdline edit bhi kar sakte ho.
 
 Live session me:
@@ -127,7 +128,16 @@ pk-info         # mode/kernel/media/root mount
 pk-net dhcp     # network
 pk-ssh          # dropbear SSH server
 pk-persist      # USB pe persistence partition banao (changes save hoonge)
-pk-install --target=auto                 # permanent install (confirm maangega)
+pk-check --save # HARDWARE + OS self-test (net, USB speed, disks, DRM, KVM, SecureBoot,
+                # runtime, wine, dmesg...) -> report /run/pk/check.txt
+pk-desktop      # GUI session (weston -> Xvfb fallback) + terminal ; pk-desktop app htop
+pk-run ./app    # koi bhi app: ELF, script, .deb, AppImage, .jar, .exe/.msi (Wine), .ipa
+pk-run --selftest        # app dispatch battery (### PK: APPS-OK ###)
+pk-ios why               # iOS apps ka sach + raaste (web wrapper / macOS guest / Darling)
+pk-android doctor        # .apk ke liye kya missing hai (binderfs/waydroid)
+pk-keymap in             # keyboard layout (console + GUI)
+pk-wifi status           # Wi-Fi ka haal (connect: pk-wifi connect <ssid> <pw>)
+pk-install --target=auto # permanent install (confirm maangega)
 ```
 
 ## 3. Permanent install
@@ -164,6 +174,11 @@ pk_media=/dev/sdb pk_install=auto pk_silent pk_halt pk_rootpw=MeraPass
   `pk-net` khud `modprobe` karta hai: virtio_net, e1000/e1000e, igb/igc, r8169,
   tg3/bnxt_en, atl1c/alx + USB-Ethernet (r8152, ax88179, asix, lan78xx, cdc_ether, smsc75xx))
 - `pk_ssh=on` → dropbear :22 chalu (`root`/`pk` se login; `pk_ssh=off` se band)
+- `pk_install_user=ramesh pk_install_userpw=<pw>` → install ke saath non-root user bhi
+  (home dir + sudo/users group); `pk_rootpw=` root ka password
+- `pk_check=1` → install ke baad bhi `pk-check` ki report (`/run/pk/check.txt`) disk par
+  copy karne ki zaroorat nahi padti; live me hi sab record ho jaata hai
+- `pk_wifi=<ssid>:<pw>` → Wi-Fi se connect (experimental, runtime me wpasupplicant)
 - Baad me bhi: `pk-net dhcp` / `pk-net status` / `pk-ssh start`
 
 Installed system me `pk-install` `/etc/default/pk` ka `PK_DHCP=yes` kar deta
@@ -244,6 +259,18 @@ pk-shell                          # runtime ke andar shell        pk-x start wes
 
 Poora doc (runtime kaise banane/kahaan rakhane kare, persistence, GUI, `pk_apps_get=`, QA
 modes, troubleshooting): **[docs/APPS.md](docs/APPS.md)**
+
+### 5d. Real pendrive test ka short version
+
+```sh
+sudo dd if=build/pkos.iso of=/dev/sdX bs=4M status=progress oflag=sync
+tools/verify-usb.sh /dev/sdX build/manifest.txt     # host se: wahi bytes likhe?
+# PC pe: Secure Boot OFF, USB se boot -> menu me 'k' (hardware check)
+pk-check --save      # net/USB speed/disk/DRM/KVM/SecureBoot/runtime/wine/dmesg
+pk-run --selftest    # app dispatch battery
+pk-desktop           # GUI (weston -> Xvfb fallback)
+```
+Poora sheet + fail par kya bhejna hai: **[docs/PENDRIVE.md](docs/PENDRIVE.md)**
 
 ### 5c. Pendrive/real-PC kit (live system ke andar)
 
