@@ -1,5 +1,12 @@
 # pk's OS · BUILD — kaise banta hai, aur kya-kya chahiye
 
+Source of truth: **https://github.com/risky-chokra/pkos** · release (base ISO, manifests,
+git bundle): **https://github.com/risky-chokra/pkos/releases/tag/v1.0.0**
+
+```sh
+git clone https://github.com/risky-chokra/pkos.git && cd pkos
+```
+
 ## Toolchain (Debian 12/13, Ubuntu 22.04/24.04)
 
 ```sh
@@ -10,6 +17,8 @@ sudo apt-get install -y build-essential make busybox-static cpio squashfs-tools 
     linux-image-amd64 dropbear openssl
 # optional lekin recommended
 sudo apt-get install -y qemu-system-x86 ovmf        # emulator QA
+sudo apt-get install -y debootstrap                  # App Runtime (build/pk-runtime.sqfs)
+sudo apt-get install -y kbd                          # console keymaps (pk-keymap ka TTY part)
 sudo apt-get install -y whois                       # mkpasswd (sha-512 hash, build time)
 ```
 
