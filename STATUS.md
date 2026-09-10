@@ -39,7 +39,9 @@ command + status). Code me jo **add** hua:
 | 7.1/7.2 net + IPC | `pk-tune net` (rmem/wmem 16 MiB, `fq`, BBR, TCP_FASTOPEN, jumbo) + `pk-tune ipc` (`/dev/shm`, POSIX mqueue, `io_uring_disabled=0`) | ✓ |
 | security observability | `pk-tune report`: ASLR/`ptrace_scope`/lockdown/CPU-vuln count/TPM device/hotplug/swap/cgroup rows | ✓ |
 
-**Full 8-stage suite: QA PASS 64 checks ok** (stage 2 = 8, stage 7 = 14, stage 8 = 19 ✓).
+**Full 8-stage suite: QA PASS 64 checks ok** (stage 2 = 8, stage 7 = 14, stage 8 = 19 ✓) ·
+asli 617 MiB desktop runtime ke saath `make gui-test`: **QA PASS 22 checks ok** (GUI + tune +
+binfmt + arch sab green) · GitHub release ke 7 assets ke sha256 = local files se **MATCH** ✓.
 🚫 jo is design/hardware par possible nahi (reason ke saath doc me): Secure Boot signing +
 TPM measured boot ka poora round, VBS (type-1 hypervisor neeche chahiye — alternative:
 `pk-vm` se app-in-VM), LSM/RBAC policy, DirectStorage GPU-P2P, kernel EAS integration,
@@ -52,7 +54,7 @@ iOS native (Mach-O + closed UIKit). Roadmap: `docs/ARCHITECTURE.md` §9.
 | `make doctor` | sab ready (0 missing) |
 | `make iso` | `build/pkos.iso` = **87 633 920 bytes (84 MiB)** (delivered `pkos-1.0.iso` isi size ka) |
 | `make test` (QEMU, **8 stages**) | **QA PASS 64 checks ok**, rc=0 (+6 is round: verify, mdev, tune, binfmt, journal, sandbox/arch) |
-| `make gui-test` (stage 8 + desktop) | **QA PASS 19 checks ok** — GUI bhi asli verify |
+| `make gui-test` (stage 8 + desktop runtime) | **QA PASS 22 checks ok** — GUI + pk-tune + pk-binfmt + foreign-arch ✓ |
 | `make apps-iso` | `build/pkos-apps.iso` = **700 MiB** (App Runtime + apt + Wine + weston/Xvfb andar) |
 | `make iso REPRODUCIBLE=1` | do alag builds ke `/live/pk.sqfs` + `/boot/pk-initrd` **sha256 same** ✓ |
 | git | **3 commits** (sandbox reset ke baad dobara init), **78 files tracked**, tree clean |
