@@ -32,7 +32,7 @@ command + status). Code me jo **add** hua:
 | 2.3 dynamic HiDPI + multi-monitor | `pk-desktop outputs` (DRM se modes), `scale 2 [OUT]`, `mode`, `transform`, `arrange`, `restart` → `weston.ini` runtime me likhta hai, reboot nahi | ini-merge test ✓ |
 | 3.1 demand paging + swap | `pk-tune swap [MB]` (holes-free swapfile → mkswap → swapon; sparse swapfile valid nahi hota) | ✓ |
 | 3.3 journaling | installer `dumpe2fs` se ext4 `has_journal` verify karta hai | `INSTALL-JOURNAL-OK` ✓ (stage 2) |
-| 4.2 plug & play drivers | **`S15mdev` hook**: busybox mdev → `/proc/sys/kernel/hotplug`, `hotplug.sh` me `modprobe $MODALIAS` (+ NIC aaye to `pk-net dhcp`); `pk_mdev=off` se band | `MDEV-OK` ✓ |
+| 4.2 plug & play drivers | **`S15mdev` hook**: `mdev -s` coldplug + `uevent mdev` netlink listener + `hotplug.sh` me `modprobe $MODALIAS`. Pehla version `/proc/sys/kernel/hotplug` par depend tha aur silent exit karta tha (VM test me pakda) → ab listener wala sahi raasta | `MDEV-OK (uevent listener + coldplug, rc=0)` ✓ VM me verified |
 | 5.3 app sandboxing | `pk-run --sandbox` = user/mnt/pid/ipc/net namespaces + tmpfs over `/root /home /mnt/persist` + ro remount try; kernel user-ns na de to `APP-SANDBOX-UNAVAIL` (boot/app kabhi nahi rokta) | `APP-SANDBOX-OK` ✓ (leak assert ke saath) |
 | 5.4 root of trust (partial) | `mk-iso` → `/live/pk.sqfs.sha256` + `/live/pk-runtime.sqfs.sha256` + ISO-root `SHA256SUMS`; init `pk_verify=1` par hash match (warn) / `pk_verify=require` par **boot rok deta hai** | `VERIFY-OK` ✓ (stage 1) |
 | 6.2 foreign-arch binaries | `pk-binfmt status|register|unregister` (binfmt_misc handlers `pk-aarch64/arm/riscv64/ppc64le/s390x`) + `pk-run` e_machine(offset 18) parse → qemu-user se dispatch; `binfmt_misc`+`cpufreq` modules live image me | `ARCH-DISPATCH-OK` ✓ |
@@ -94,6 +94,19 @@ sudo make runtime-desktop && make apps-iso   # 700 MiB wala apps+GUI ISO dobara
 ```
 Sandbox me bade files (700 MB ISO, `build/`) persist nahi hote — chhote (src tar,
 bundle, manifests, base ISO) persist hote hain, isliye wahi backup hain.
+
+### 2c. Aapke VirtualBox test se nikle 2 asli bug (aaj fix + VM me verify)
+
+| bug | lakshan | fix |
+|---|---|---|
+| `udhcpc` ka `default.script` git me **644** (exec bit nahi) | `udhcpc rc=0`, lease milta hai, phir bhi `### PK: NET-FAIL ###` — fresh clone se build karne par network toot jaata | `build-rootfs` ab stage karte waqt usse (aur `etc/init.d/pk-boot`) 755 karta hai + index me bhi `+x`; VM me `NET-OK (10.0.2.15)` + `SSH-OK` ✓ |
+| `S15mdev` legacy `/proc/sys/kernel/hotplug` sysctl par depend, silent exit | docs me `MDEV-OK` claim, par image me koi marker nahi | busybox `uevent mdev` netlink listener + `mdev -s`; har branch print karta hai → `MDEV-OK (uevent listener + coldplug, rc=0)` ✓ |
+
+(Aapki VM ki asli problem kuch aur thi: VirtualBox me **UEFI + Secure Boot ON** tha — `VBox.log` me
+`Firmware type: UEFI / Secure Boot: Enabled`. Hamara GRUB unsigned hai isliye OVMF use load hi
+nahi karta. Fix: Settings → System → Motherboard → **Enable Secure Boot untick** (EFI rakhna ho)
+ya **Enable EFI untick** kar do (BIOS path QA me verified hai ✓). ISO aapke VM me sahi attach thi:
+VBox log ka `LUN#2: CD/DVD sectors=358322` × 2048 = 733 843 456 B = bilkul wahi file ✓)
 
 ## 3. Is round me jo bug pakde aur fix kiye
 

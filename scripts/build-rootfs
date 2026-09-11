@@ -36,7 +36,11 @@ fi
 
 # ---------------------------------------------------------------- overlay script hygiene
 # mode bhoolna common footgun hai (git tar/zip se +x ud jaata hai) -> yahan fix
-for f in "$OV"/sbin/pk-* "$OV"/bin/pk-* "$OV"/etc/pk-boot.d/S*; do
+# NOTE: git me exec bit kho jaati hai (zip/clone/mode-reset) - yahan stage karte
+# waqt dobara 755 kar dete hain, warna udhcpc ka default.script non-executable
+# reh jaata hai aur DHCP lease milne ke baad bhi IP configure nahi hota (NET-FAIL).
+for f in "$OV"/sbin/pk-* "$OV"/bin/pk-* "$OV"/etc/pk-boot.d/S* \
+         "$OV"/usr/share/udhcpc/default.script "$OV"/etc/init.d/pk-boot; do
   [ -f "$f" ] || continue
   chmod 755 "$f"
   sh -n "$f" || die "syntax error in $f"

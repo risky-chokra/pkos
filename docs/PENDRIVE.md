@@ -88,7 +88,7 @@ Pass ka matlab (serial/console par ye lines aani chahiye):
 
 ```
 ### PK: BOOT-OK mode=live ...
-### PK: MDEV-OK (hotplug=/bin/mdev) ###        # plug & play driver loading on
+### PK: MDEV-OK (uevent listener + coldplug, rc=0) ###   # plug & play driver loading
 ### PK: VERIFY-OK (pk.sqfs) ###                 # payload integrity (pk_verify=1 wale boot par)
 ### PK: TUNE-REPORT-OK ###  BINFMT-STATUS-OK  ARCH-DISPATCH-OK
 ### PK: DEPS-OK ###
@@ -156,7 +156,7 @@ dikhega (ye QA stage 8 me automate hai ✓).
 | USB boot list me hi nahi | BIOS me Secure Boot OFF, "USB legacy/UEFI" dono try; `tools/verify-usb.sh /dev/sdX` |
 | GRUB aata hai par kernel panic | `make iso` host ke `/boot/vmlinuz-*` + `/lib/modules` use karta hai → `PK_KERNEL=`/`PK_MODULES=` se doosra kernel; `dmesg` me ` squashfs` error ho to `make iso SQUASH_COMP=xz` (kernel me zstd na ho) |
 | Black screen, koi prompt | `c` (serial) try, ya `pk_debug`; display na ho to `g` ki jagah `l` |
-| Net nahi (wired) | `pk-net dhcp` ; marker `NET-OK (ip)` dekho |
+| Net nahi (wired) | `pk-net dhcp` ; marker `NET-OK (ip)` dekho. `udhcpc rc=0` par IP na aaye → `default.script` ka exec bit (purani ISOs): `ls -l /usr/share/udhcpc/default.script` (755 chahiye); fixed in current build |
 | Wi-Fi connect karna hai | `pk-wifi status` → phir `pk-get install -y wpasupplicant iw` (runtime me) → `pk-wifi connect <ssid> <pw>`. Boot me hi chahiye to `pk_wifi=<ssid>:<pw>`. Ye path **is sandbox me test nahi hua** (wireless hardware nahi) — fail ho to `/run/pk/wifi-boot.log` bhejo |
 | App not found / permission | `pk-info`, `pk-run --list`, `pk-runtime status`; runtime ke liye `sudo make runtime` + `make apps-iso` |
 | Install ke baad boot nahi | BIOS me us disk ko first boot karo; `pk-install` ke log me `grub-install` ki line dekho (`pk_silent` ho to /run/pk-install.log tail console par aata hai) |

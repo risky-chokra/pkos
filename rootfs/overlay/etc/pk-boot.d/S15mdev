@@ -27,11 +27,16 @@ cat > /etc/mdev/hotplug.sh <<'HOOK'
 #!/bin/sh
 # /etc/mdev.conf ke @action se chalta hai; vars mdev set karta hai
 case "${ACTION:-add}" in
-  add|remove)
+  add)
     [ -n "${MODALIAS:-}" ] && modprobe -q "$MODALIAS" 2>/dev/null
-    if [ -n "${INTERFACE:-}" ] && grep -q '^PK_DHCP=yes' /etc/default/pk 2>/dev/null; then
-      have() { command -v "$1" >/dev/null 2>&1; }
-      have pk-net && pk-net dhcp >/dev/null 2>&1
+    # NIC aaya par IP nahi? sirf yaad dilate hain - DHCP ko S20net/pk-net hi
+    # control karta hai (yahan se pk-net chalana race karta tha: hook ka udhcpc
+    # pidfile le leta tha, phir mar jaata tha -> NET-FAIL).
+    if [ -n "${INTERFACE:-}" ]; then
+      cnt=$(ip -4 addr show "$INTERFACE" 2>/dev/null | grep -c 'inet ')
+      if [ "${cnt:-0}" = 0 ]; then
+        printf 'pk-boot(mdev): NIC %s add hua par IP nahi - `pk-net dhcp` chalao\n' "$INTERFACE" > /dev/kmsg 2>/dev/null
+      fi
     fi
     ;;
 esac
