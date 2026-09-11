@@ -31,3 +31,4 @@ mksquashfs
 setfacl
 swapon
 dumpe2fs
+blkdiscard

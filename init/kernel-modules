@@ -58,3 +58,13 @@ hid_generic
 # chahiye hi nahi. NIC drivers live rootfs ke /lib/modules me hain (dhimi par
 # sahi jagah), wahan modprobe/se aa jayenge. Net drivers yahan daalne se initrd
 # ~4MB bhaari hoti hai aur boot me ~1s extra lagta hai - fayda zero.
+
+# --- filesystem ke runtime deps: modules.dep inhe list nahi karta, isliye explicit ---
+# (inke bina initramfs me 'mount -t vfat' fail -> FAT32/exFAT pendrive pe image boot hi
+#  nahi karti thi; ntfs3 se Windows partition par rakhi ISO/frugal image padhte hain)
+nls_cp437
+nls_utf8
+msdos
+unicode
+ntfs3
+crc_itu_t

@@ -143,6 +143,50 @@ stage "1/8  live boot from ISO (grub + cdrom)"
   if grep -q 'BOOT FAIL\|Kernel panic' "$L"; then note "--- live log tail ---"; tail -25 "$L" | sed 's/^/    /'; fi
 fi
 
+# ------------------------------------------------- 1b: media-format regression (FAT32 + frugal)
+# Alpine/TinyCore/Ubuntu-casper/Ventoy jaisi media layouts. initrd me nls_cp437/nls_utf8/
+# unicode + mount-option variants ke bina ye chup-chaap fail hoti thi (screen khaali!).
+if want 1 && have mkfs.vfat && have mcopy; then
+  stage "1b/8  media formats: FAT32 partition + frugal (ISO as a file)"
+  bd=$BUILD/mediachk; rm -rf "$bd"; mkdir -p "$bd"
+  wrap_mbr() { # <raw-fat-image> <out-img> <total-mb>
+    src=$1; out=$2; tot=$3
+    rm -f "$out"
+    dd if=/dev/zero of="$out" bs=1M count="$tot" status=none || return 1
+    parted -s "$out" mklabel msdos mkpart primary fat32 1MiB 100% >/dev/null 2>&1 || return 1
+    dd if="$src" of="$out" bs=1M seek=1 conv=notrunc status=none || return 1
+    return 0
+  }
+  # (i) FAT32 partition me /live/pk.sqfs (frugal nahi - direct file layout)
+  dd if=/dev/zero of="$bd/sqfs.raw" bs=1M count=120 status=none
+  if mkfs.vfat -F 32 -n PKCHK "$bd/sqfs.raw" >/dev/null 2>&1 && \
+     mmd -i "$bd/sqfs.raw" ::/live >/dev/null 2>&1 && \
+     mcopy -i "$bd/sqfs.raw" "$WORK/iso/live/pk.sqfs" ::/live/pk.sqfs >/dev/null 2>&1 && \
+     wrap_mbr "$bd/sqfs.raw" "$bd/sqfs.img" 122; then
+    run_vm "$LOGDIR/01c-vfatmedia.log" 220 \
+      -drive "file=$bd/sqfs.img,if=virtio" -kernel "$RK" -initrd "$RI" \
+      -append "console=ttyS0 loglevel=5 pk_selftest pk_poweroff"
+    check "$LOGDIR/01c-vfatmedia.log" 'PK: BOOT-OK mode=live' "FAT32 partition media se live boot (vfat+nls initrd fix)"
+    check "$LOGDIR/01c-vfatmedia.log" 'fs=vfat'               "media vfat se mount hua (nls_cp437/utf8 path)"
+  else
+    bad "FAT32 media fixture ban hi nahi (mtools/parted check karo)"
+  fi
+  # (ii) frugal: partition me sirf ISO file (Ubuntu casper iso-scan / Ventoy style)
+  dd if=/dev/zero of="$bd/frugal.raw" bs=1M count=200 status=none
+  if mkfs.vfat -F 32 -n PKFRUG "$bd/frugal.raw" >/dev/null 2>&1 && \
+     mcopy -i "$bd/frugal.raw" "$ISO" ::/pkos-1.0.iso >/dev/null 2>&1 && \
+     wrap_mbr "$bd/frugal.raw" "$bd/frugal.img" 202; then
+    run_vm "$LOGDIR/01d-frugal.log" 220 \
+      -drive "file=$bd/frugal.img,if=virtio" -kernel "$RK" -initrd "$RI" \
+      -append "console=ttyS0 loglevel=5 pk_selftest pk_poweroff"
+    check "$LOGDIR/01d-frugal.log" 'PK: BOOT-OK mode=live' "frugal: sirf ISO file se live boot (loop+iso9660)"
+    check "$LOGDIR/01d-frugal.log" '/dev/loop'             "frugal ISO loop-mount se mount hui"
+  else
+    bad "frugal fixture ban hi nahi (mtools check karo)"
+  fi
+  rm -rf "$bd"
+fi
+
 # ---------------------------------------------------------------- 2 + 3: install
 if [ "$SKIP_INSTALL" = 1 ]; then
   stage "2/7 + 3/7  skipped (PK_TEST_SKIP_INSTALL=1)"

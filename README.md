@@ -116,6 +116,20 @@ andar, USB ke alag `PK-RUNTIME` partition me, ya installed system ke `/var/lib/p
 (design: docs/APPS.md). Isi liye base image chhota rehta hai aur apps layer add-on hai.
 
 ## 2. Live pendrive banao
+### 2a. Frugal boot (bina dd ke) + media retry
+
+`pkos*.iso` file ko kisi bhi partition (FAT32/exFAT/NTFS/ext4) par rakh do — init use
+loop-mount karke `/live/pk.sqfs` nikaal leta hai (Ubuntu `iso-scan`/TinyCore/Alpine jaisa):
+
+```sh
+# stick par: (MBR + ek FAT32 partition) aur usme pkos-1.0.iso file
+sudo mkfs.vfat -F 32 /dev/sdX1 && sudo mcopy -i /dev/sdX1 build/pkos.iso ::/pkos-1.0.iso
+# boot option se pin karo (auto-scan bhi karta hai):  pk_iso=/pkos-1.0.iso
+# dheeme USB reader ke liye:  rootdelay=40      (default 12 s wait hota hai)
+# media mount debug:         pk_fsdebug=1       (har mount ka asli error + size + head bytes)
+```
+
+
 
 ```sh
 lsblk                                  # USB ka naam dekho (jaise /dev/sdb)
@@ -322,6 +336,7 @@ Boot options (GRUB me `e`, ya menu entries `g`/`k`): `pk_check=1` (ya `pk_check=
 | [docs/PENDRIVE.md](docs/PENDRIVE.md) | **aapke real pendrive test ka sheet** (kya karna hai, kaunsi line pass mani jaayegi, kya bhejna hai) |
 | [docs/VM-TEST.md](docs/VM-TEST.md) | **VirtualBox / VMware / QEMU me chalane ka sheet** (settings, commands, expected `### PK:` markers, atakne par fix) |
 | [docs/IOS-ANDROID.md](docs/IOS-ANDROID.md) | iOS/Android: kya chalta hai, kyun nahi chalta, kaunse raaste actually kaam karte hain |
+| [docs/COMPARE.md](docs/COMPARE.md) | Alpine / ArchISO / Fedora-live / Ubuntu-casper / TinyCore / SystemRescue / Ventoy se **live-boot matric** ka tulna — kya seekha, kya add kiya, kya jaan-boojh ke nahi kiya |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | modern desktop-OS requirements (scheduling/GPU/memory/security/IPC) — is OS me kaun karta hai, kaise verify karein, kya possible nahi |
 | [docs/APPS.md](docs/APPS.md) | App Runtime (Debian userland + apt + Wine) |
 | [docs/TROUBLE.md](docs/TROUBLE.md) | markers se debugging |

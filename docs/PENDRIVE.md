@@ -44,6 +44,10 @@ tools/verify-usb.sh /dev/sdX build/manifest.txt      # host se verify: wahi byte
 
 `verify-usb.sh` ka result `ok=N fail=0` ho to media sahi hai. `fail>0` → dobara dd.
 
+**dd nahi karna?** Frugal bhi chalega — FAT32 partition me `pkos-1.0.iso` file rakh do
+(init loop-mount kar leta hai; pin karne ke liye `pk_iso=/pkos-1.0.iso`). Dheeme reader par
+`rootdelay=40`; media mount ka error dekhna ho to `pk_fsdebug=1` (details: docs/COMPARE.md).
+
 VM me pehle try karna ho to: **[VM-TEST.md](VM-TEST.md)** (QEMU/VirtualBox/VMware settings + expected markers).
 
 ## 2. PC se boot

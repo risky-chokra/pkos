@@ -15,6 +15,7 @@ kernel/fs/btrfs
 kernel/fs/f2fs
 kernel/fs/ntfs3
 kernel/fs/nls
+kernel/fs/unicode
 kernel/fs/jbd2
 kernel/fs/mbcache.ko*
 kernel/crypto

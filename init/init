@@ -74,6 +74,9 @@ SILENT=0
 HALT=0
 NETCFG=
 RTCFG=
+ISOHINT=
+ROOTDELAY=
+FSDEBUG=0
 VERIFY=
 for a in $(cat /proc/cmdline); do
   # legacy: purane SwapeOS images/USB `swape_*` options bhej sakte hain
@@ -101,6 +104,10 @@ for a in $(cat /proc/cmdline); do
     pk_runtime=*)    RTCFG=${a#*=} ;;
     single|S)           SINGLE=1 ;;
     break=*)            BREAK=${a#*=} ;;
+    pk_iso=*)           ISOHINT=${a#*=} ;;
+    rootdelay=*)        ROOTDELAY=${a#*=} ;;
+    pk_rootdelay=*)     ROOTDELAY=${a#*=} ;;
+    pk_fsdebug|pk_fsdebug=1) FSDEBUG=1 ;;
   esac
 done
 if [ "$DEBUG" = 1 ]; then
@@ -114,7 +121,10 @@ fi
 if [ -d /mods ]; then
   for m in /mods/*; do
     [ -e "$m" ] || continue
-    insmod "$m" 2>/dev/null || dbg "insmod $(basename "$m") -> already builtin?"
+    if ! insmod "$m" 2>/tmp/ins.err; then
+      dbg "insmod $(basename "$m") -> already builtin?"
+      [ "${FSDEBUG:-0}" = 1 ] && printf '[pk-init] fsdebug: insmod %s -> %s\n' "$(basename "$m")" "$(tr '\n' ' ' </tmp/ins.err 2>/dev/null | cut -c1-90)" > /dev/console 2>/dev/null
+    fi
   done
 fi
 
@@ -130,6 +140,13 @@ list_devices() { # disks + unke partitions, /dev/..
       pb=${p##*/}
       case "$pb" in *[0-9]) [ -b "/dev/$pb" ] && printf '/dev/%s\n' "$pb" ;; esac
     done
+  done
+}
+
+list_extra_devs() { # device-mapper / Ventoy jaise naam: /dev/mapper/* + /dev/dm-*
+  for d in /dev/mapper/* /dev/dm-*; do
+    [ -b "$d" ] || continue
+    printf '%s\n' "$d"
   done
 }
 
@@ -182,26 +199,92 @@ if [ -n "$ROOTARG" ]; then
 fi
 
 # ------------------------------------------------------------------ live base
+live_paths() { printf '%s\n' /live/pk.sqfs /live/swape.sqfs /PK/SQFS /SWAPE/SQFS /boot/live/pk.sqfs; }
+
+try_sqfs_here() { # <fs-ka-mountpoint-ready-at-/mnt/media> -> 0 if found (prints path)
+  for p in $(live_paths); do
+    if [ -f "/mnt/media$p" ]; then printf '%s\n' "$p"; return 0; fi
+  done
+  return 1
+}
+
+# Frugal / Ventoy-style support: ISO *file* kisi partition par para ho
+# (mk_usb ntfs3/fat32 partition, hard-disk boot, "iso file copy kar di") ->
+# use loop-mount karke usme /live/pk.sqfs dhoondo.
+try_iso_file() { # <dev> -> prints "<loopdev> <path> iso9660" 0
+  iso=""
+  if [ -n "${ISOHINT:-}" ]; then
+    case "$ISOHINT" in
+      /*) [ -f "$ISOHINT" ] && iso=$ISOHINT ;;      # absolute path /mnt/media ke andar ka
+      *)  for c in "/mnt/media/$ISOHINT" "/mnt/media"/*"$ISOHINT"*.iso; do
+            [ -f "$c" ] && { iso=$c; break; }
+          done ;;
+    esac
+  else
+    for c in /mnt/media/pkos*.iso /mnt/media/PKOS*.iso /mnt/media/*.iso; do
+      [ -f "$c" ] || continue
+      case "$c" in */EFI*|*/efi/*) continue ;; esac
+      iso=$c; break
+    done
+  fi
+  [ -n "$iso" ] || return 1
+  # 512-byte aligned hone par hi direct loop chalega (ntfs/exfat par unaligned bhi ho sakta hai)
+  loop=$(losetup -f 2>/dev/null); [ -n "$loop" ] || return 1
+  losetup -r "$loop" "$iso" 2>/dev/null || losetup "$loop" "$iso" 2>/dev/null || return 1
+  mkdir -p /mnt/iso-src 2>/dev/null
+  if mount -o ro -t iso9660 "$loop" /mnt/media 2>/dev/null || mount -o ro -t udf "$loop" /mnt/media 2>/dev/null; then
+    p=$(try_sqfs_here) || { umount /mnt/media 2>/dev/null; losetup -d "$loop" 2>/dev/null; return 1; }
+    printf '%s %s iso9660\n' "$loop" "$p"
+    return 0
+  fi
+  losetup -d "$loop" 2>/dev/null
+  return 1
+}
+
 find_live_image() { # -> "<dev> <path-in-fs> <fstype>"
-  mkdir -p /mnt/media
+  mkdir -p /mnt/media /mnt/iso-src
   if [ -n "$MEDIAHINT" ]; then
     cands=$(resolve_dev "$MEDIAHINT" 2>/dev/null)
     [ -n "${cands:-}" ] || cands=$MEDIAHINT
+    cands="$cands $(list_extra_devs)"
   else
-    cands=$(list_devices)
+    cands="$(list_devices) $(list_extra_devs)"
   fi
   for dev in $cands; do
     [ -b "$dev" ] || continue
-    for t in iso9660 udf vfat exfat ext4 xfs ntfs3; do
+    # (a) common fs types, (b) vfat ke option variants (kernels/images ke bhed se
+    # iocharset/utf8 par EINVAL mil sakta hai), (c) ant me kernel ka auto-detect.
+    for spec in iso9660:ro udf:ro vfat:ro vfat:ro,utf8 vfat:ro,iocharset=utf8 \
+                msdos:ro exfat:ro ext4:ro xfs:ro ntfs3:ro btrfs:ro f2fs:ro auto:ro; do
+      t=${spec%%:*}; o=${spec#*:}
       mounted /mnt/media && umount /mnt/media 2>/dev/null
-      mount -o ro -t $t "$dev" /mnt/media 2>/dev/null || continue
-      for p in /live/pk.sqfs /live/swape.sqfs /PK/SQFS /SWAPE/SQFS; do
-        if [ -f "/mnt/media$p" ]; then
-          # /mnt/media MOUNTED rehne do - caller reuse karta hai
-          printf '%s %s %s\n' "$dev" "$p" "$t"
-          return 0
+      if [ "$t" = auto ]; then
+        mount -o "$o" "$dev" /mnt/media 2>/tmp/mnt.err
+      else
+        mount -o "$o" -t "$t" "$dev" /mnt/media 2>/tmp/mnt.err
+      fi
+      if [ $? -ne 0 ]; then
+        if [ "${FSDEBUG:-0}" = 1 ]; then
+          printf '[pk-init] fsdebug: mount -t %s -o %s %s -> %s\n' "$t" "$o" "$dev" \
+            "$(tr '\n' ' ' </tmp/mnt.err 2>/dev/null | cut -c1-110)" > /dev/console 2>/dev/null
+          if [ "$t" = iso9660 ]; then
+            sz=$(cat "/sys/class/block/${dev#/dev/}/size" 2>/dev/null)
+            hd=$(dd if="$dev" bs=512 count=1 skip=0 2>/dev/null | od -An -tx1 -N 16 2>/dev/null | tr -s ' \n' ' ')
+            printf '[pk-init] fsdebug: %s sectors=%s head=%s\n' "$dev" "${sz:-?}" "${hd:-?}" > /dev/console 2>/dev/null
+          fi
         fi
-      done
+        continue
+      fi
+      if p=$(try_sqfs_here); then
+        # /mnt/media MOUNTED rehne do - caller reuse karta hai
+        printf '%s %s %s\n' "$dev" "$p" "$t"
+        return 0
+      fi
+      # FS mila par sqfs nahi -> kya yahan ISO file pari hai? (frugal / Ventoy-style)
+      if out=$(try_iso_file "$dev"); then
+        printf '%s\n' "$out"
+        return 0
+      fi
     done
     mounted /mnt/media && umount /mnt/media 2>/dev/null
   done
@@ -210,7 +293,19 @@ find_live_image() { # -> "<dev> <path-in-fs> <fstype>"
 
 mount_live_base() {
   mkdir -p /ro /mnt/media
-  found=$(find_live_image) || return 1
+  # media settle ka wait: slow USB3 stick / mmc par devices 2-8s me aate hain
+  # (Alpine rootdelay, Arch rootdelay, Fedora rd.retry jaisa hi) - pk rootdelay=/rootdelay= se badhayein
+  tries=0
+  maxtries=${ROOTDELAY:-12}
+  found=""
+  while [ "$tries" -lt "$maxtries" ]; do
+    found=$(find_live_image) && break
+    [ "$tries" = 0 ] && say "media dhoondh raha hoon (rootdelay ${maxtries}s)..."
+    sleep 1
+    tries=$((tries + 1))
+  done
+  [ -n "$found" ] || return 1
+
   set -- $found
   MEDIA=$1; IMG=$2; MEDIATYPE=${3:-auto}
   say "live base: $IMG from $MEDIA (fs=$MEDIATYPE)"
@@ -255,6 +350,10 @@ mount_live_base() {
     if cp "$SRC" /run/toram/pk.sqfs 2>/dev/null; then
       SRC=/run/toram/pk.sqfs
       umount /mnt/media 2>/dev/null
+      # frugal (ISO file) case: loop + source fs ab chahiye nahi -> chhod do
+      case "${MEDIA:-}" in
+        /dev/loop*) losetup -d "$MEDIA" 2>/dev/null || true; umount /mnt/iso-src 2>/dev/null || true ;;
+      esac
       say "toram done - ab boot media nikaal sakte ho"
     else
       say "toram copy fail -> media se hi mount"

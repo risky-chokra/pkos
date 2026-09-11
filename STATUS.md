@@ -115,6 +115,22 @@ VBox log ka `LUN#2: CD/DVD sectors=358322` × 2048 = 733 843 456 B = bilkul wahi
 | `make iso PK_SERIAL=1` → `pkos-1.0-serial.iso` (release ka naya asset) | "screen hi nahi aayi" wali halat me bhi poora boot padhne layak: default entry me `console=ttyS0,115200n8` | QEMU `-display none` + `-serial file:` me GRUB menu (12 entries) + `### PK: BOOT-OK … ###` + `login: root / pk` + `pk:/root#` prompt ✓ (`pkos-vm-serial-demo.log`) |
 | `scripts/mk-initrd`: **static busybox ka hard check** | is sandbox me ek baar `busybox-static` absent tha → initrd me dynamic busybox gaya → `/bin/sh: libresolv.so.2 … ` + `Kernel panic - not syncing: Attempted to kill init!` = **bilkul khali screen**. Aise me build ab chup-chaap toota ISO banane ke bajaye die karta hai (`PK_ALLOW_DYNAMIC_BUSYBOX=1` do to lib closure copy karke chale bhi deta hai) | `make doctor` me "static busybox: /bin/busybox" row ✓ |
 
+## 2e. Reference-OS audit (Alpine / ArchISO / Fedora-live / Ubuntu-casper / TinyCore / SystemRescue / Ventoy)
+
+Poora table: **docs/COMPARE.md**. Jo kami is comparison se nikli — sab *add* ki, kuch hataaya nahi:
+
+| kami (real-hardware risk) | fix | proof |
+|---|---|---|
+| initrd me `nls_cp437`/`nls_utf8`/`msdos`/`ntfs3` nahi the (Debian ka `vfat` inhe runtime me maangta hai; `modules.dep` me ye dep nahi, isliye hamara closure bhi nahi laata) → **FAT32/exFAT pendrive partition se image boot hi nahi hoti thi** | modules initrd me add + live-modules me `kernel/fs/unicode`/`fat` | QEMU: `live base: /live/pk.sqfs from /dev/vda1 (fs=vfat)` → `BOOT-OK` ✓ |
+| ek hi `mount -t <fs>` attempt → option mismatch par `EINVAL` (yahi upar wala bug chupa hua tha) | `vfat:ro,utf8`, `iocharset=utf8`, `msdos`, aur ant me **auto-detect** fallback | same test ✓ |
+| live media ke liye koi retry nahi (retry sirf installed `root=` me tha) → dheeme USB3/mmc reader par "media nahi mila" | `rootdelay=`/`pk_rootdelay=` + retry loop (default 12 s) — Alpine `realroot`/casper `CASPER_TIMEOUT`/`wait=` jaisa | QA me pass ✓ |
+| **Frugal boot nahi tha** (ISO file ko partition me rakh ke boot — Ubuntu `iso-scan`, TinyCore/Alpine, Ventoy ka model) | `try_iso_file()`: `pkos*.iso`/`*.iso` auto-scan + `pk_iso=<path|naam>` pin; loop+iso9660 mount | QEMU: `BOOT-OK media=/dev/loop0` ✓ |
+| `/dev/mapper/*` (Ventoy dm device) scan me nahi | `list_extra_devs()` + extra live paths (`/boot/live/pk.sqfs`) + `btrfs`/`f2fs` | scan logic ✓ |
+| "screen khaali" jaisa bug field me debug karna mushkil | `pk_fsdebug=1` → har mount ka asli error + device size/first-sector + insmod failures | is se hi ye bug pakda ✓ |
+| admin tooling (SystemRescue/Alpine parity) | live image me `lsblk`, `findmnt`, `wipefs`, `blkdiscard` | `make iso` ✓ |
+| `make usb` sirf dd karta tha | **`tools/write-usb.sh --frugal`**: MBR + FAT32 + ISO file copy (init usse loop-mount karta hai) | tool se bana image QEMU me bootable ✓ |
+| QA me media layouts cover nahi | **naya stage `1b`**: FAT32-partition media + frugal ISO-file boot (4 checks) | **`QA PASS 68 checks ok`** ✓ |
+
 ## 3. Is round me jo bug pakde aur fix kiye
 
 1. **pk-x ka jhootha success** — x-env likh dena = "session chal gaya" (weston mar bhi

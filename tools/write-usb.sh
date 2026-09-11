@@ -1,13 +1,18 @@
 #!/bin/sh
 # pk's OS :: ISO -> USB pendrive (hybrid dd)
 #
-#   tools/write-usb.sh /dev/sdX [iso]
+#   tools/write-usb.sh /dev/sdX [iso]                # dd (recommended)
+#   tools/write-usb.sh /dev/sdX [iso] --frugal        # MBR + FAT32 + ISO file copy
 #   make usb USB=/dev/sdX
 #
 # kya hota hai:
 #   - ISO hybrid hai (isohybrid MBR + protective GPT + El Torito) -> same file
 #     BIOS aur UEFI dono se boot karti hai, aur dd se seedha USB pe likhi jaati hai.
 #   - USB ka purana data MIT jaata hai. Isliye pehle confirm + safety checks.
+#   --frugal: dd nahi kar sakte (VM/locked host/persistent stick share karna ho) to
+#     device par MBR + ek FAT32 partition bana ke ISO *file* ke roop me copy karta hai;
+#     hamara init use loop-mount kar leta hai (Ubuntu casper 'iso-scan' jaisa) ✓ verified
+#     (docs/COMPARE.md). Minus: persistence ke liye alag partition khud banana padega.
 #   - persistence chahiye to baad me 'pk-persist' (live system me) ya
 #     docs/PERSISTENCE.md wale commands use karo - likhne ke baad extra partition.
 # shellcheck shell=sh disable=SC3030,SC2086
@@ -19,6 +24,16 @@ die()  { printf '\033[1;31m[usb FAIL]\033[0m %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 PK_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+MODE=dd
+_args=""
+for a in "$@"; do
+  case "$a" in
+    --frugal) MODE=frugal ;;
+    --dd)     MODE=dd ;;
+    *)        _args="$_args $a" ;;
+  esac
+done
+set -- $_args
 DEV=${1:-}
 ISO=${2:-$PK_ROOT/build/pkos.iso}
 FORCE=0
@@ -70,7 +85,34 @@ if [ -t 0 ] && [ "$FORCE" != 1 ]; then
   [ "$ans" = "YES" ] || die "cancel kiya (kuch nahi likha)"
 fi
 
-# --- unmount (agar kuch toot-futa mounted ho) & write
+# ---------------------------------------------------------------- frugal mode
+if [ "$MODE" = frugal ]; then
+  have parted    || die "parted chahiye (sudo apt-get install -y parted)"
+  have mkfs.vfat || die "mkfs.vfat chahiye (sudo apt-get install -y dosfstools)"
+  have mcopy     || die "mcopy chahiye (sudo apt-get install -y mtools)"
+  [ -f "$ISO" ] || die "ISO nahi mila: $ISO"
+  log "frugal mode: MBR + FAT32 partition me ISO file copy"
+  for p in ${REAL}1 ${REAL}p1; do umount "$p" 2>/dev/null || true; done
+  parted -s "$REAL" mklabel msdos || die "mklabel fail"
+  parted -s "$REAL" mkpart primary fat32 1MiB 100% || die "mkpart fail"
+  partprobe "$REAL" 2>/dev/null || true; sync; sleep 2
+  p1="${REAL}1"; case "$REAL" in *[0-9]) p1="${REAL}p1" ;; esac
+  [ -b "$p1" ] || { blockdev --rereadpt "$REAL" 2>/dev/null || true; partprobe "$REAL" 2>/dev/null || true; sleep 2; }
+  [ -b "$p1" ] || die "$p1 nahi bana (parted/udev? --dd mode use karo)"
+  mkfs.vfat -F 32 -n PKOS "$p1" >/dev/null || die "mkfs.vfat fail"
+  name=$(basename "$ISO"); case "$name" in *.iso) : ;; *) name="$name.iso" ;; esac
+  mcopy -i "$p1" "$ISO" "::/$name" || die "mcopy fail"
+  for extra in "${ISO%.iso}.sha256" "$PK_ROOT/build/README-ISO.txt"; do
+    [ -f "$extra" ] && mcopy -i "$extra" ::/ >/dev/null 2>&1 || true
+  done
+  sync
+  log "ho gaya ✓  $p1 par /$name (boot: GRUB/BIOS -> 'Booting from Hard Disk', ya UEFI entry)"
+  log "  kernel option chahiye to: pk_iso=/$name   (auto-scan bhi karta hai)"
+  log "  persistence: baad me ek ext4 partition bana ke label PK-PERSIST do"
+  exit 0
+fi
+
+# ---------------------------------------------------------------- unmount (agar kuch toot-futa mounted ho) & write
 for p in /sys/block/$NAME/${NAME}*; do
   [ -b "/dev/${p##*/}" ] && umount "/dev/${p##*/}" 2>/dev/null || true
 done
