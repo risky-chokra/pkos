@@ -98,6 +98,23 @@ make run           # QEMU me live session (serial/stdio)
 (43 = saate stages ke total checks; machine pe depend karta hai — TCG emulation me
 ~10 min lagte hain. `make test-apps` se sirf apps layer, ~30 s me.)
 
+## 1b. Do ISO kyun — aur kaunsi **ek** file lein
+
+Chahiye to sirf **ek**: `pkos-1.0-apps.iso` (700 MiB). Wo superset hai — andar bilkul wahi
+base OS hai (`boot/pk-kernel`, `boot/pk-initrd`, `live/pk.sqfs` ke sha256 dono ISO me **same**,
+manifest se verify kiya) + upar se ek extra file `/live/pk-runtime.sqfs` (Debian App Runtime:
+apt/dpkg + Wine + weston/Xvfb + xterm). `pkos-1.0.iso` (84 MiB) optional hai — "bas boot +
+install + tools" chahiye ya net slow hai to.
+
+| file | andar kya | kab lo |
+|---|---|---|
+| `pkos-1.0-apps.iso` | base OS **+** `/live/pk-runtime.sqfs` (apt, Wine, weston, xterm, mesa) | **recommended — ek hi file flash karo** |
+| `pkos-1.0.iso` | base OS only (koi runtime nahi) | chhota download; apps baad me `sudo make runtime` se |
+
+Runtime ko jaan-boojh ke alag layer rakha hai, kyunki wo 3 jagah se aa sakta hai — ISO ke
+andar, USB ke alag `PK-RUNTIME` partition me, ya installed system ke `/var/lib/pk` me
+(design: docs/APPS.md). Isi liye base image chhota rehta hai aur apps layer add-on hai.
+
 ## 2. Live pendrive banao
 
 ```sh

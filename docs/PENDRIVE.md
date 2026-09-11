@@ -26,6 +26,12 @@ Reproducible payload chahiye to: `make iso REPRODUCIBLE=1` → `build/manifest.t
 `/live/pk.sqfs` + `/boot/pk-initrd` hashes do baar same aayenge (ISO container ka
 timestamp alag rehta hai — isliye manifest hi sahi check hai).
 
+## 0b. Kaunsi ISO flash karein (ek hi chahiye)
+
+**`pkos-1.0-apps.iso`** — single file kaafi hai: base OS + App Runtime (apt/Wine/GUI) dono
+uske andar hain (base ke payload hashes isme bhi wahi hain; sirf `live/pk-runtime.sqfs` extra).
+`pkos-1.0.iso` optional hai (84 MiB, bina runtime ke).
+
 ## 1. Pendrive pe likho
 
 ```sh
