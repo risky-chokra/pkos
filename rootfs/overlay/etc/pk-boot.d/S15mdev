@@ -1,48 +1,73 @@
 #!/bin/sh
-# pk's OS boot hook :: dynamic driver management (plug & play) busybox mdev se
-#   boot option: pk_mdev=off  se band (default: on)
+# pk's OS boot hook :: dynamic device/node + driver management (busybox mdev)
+#   default: ON   (band karna ho to boot option: pk_mdev=off  ya  nomdev)
 #
-# Hamare live image me udev/systemd nahi hai; isliye kernel ke hotplug hook par
-# busybox ka mdev lagate hain: USB/Thunderbolt/PCI device aate hi uska modalias
-# modprobe hota hai (nic, wifi dongle, storage, input) aur /dev ke nodes bante hain.
+# Modern kernels (>=6.5) me purana /proc/sys/kernel/hotplug helper interface par
+# bharosa nahi; isliye yahan netlink listener (`uevent mdev`) + coldplug (`mdev -s`)
+# chalate hain. Har uevent par /etc/mdev/hotplug.sh chalta hai -> modprobe $MODALIAS
+# (USB wifi/ethernet/storage aate hi driver) aur NIC aaye to (PK_DHCP=yes ho) DHCP bhi.
 set -u
 PATH=/bin:/sbin:/usr/bin:/usr/sbin
-[ -e /proc/sys/kernel/hotplug ] || exit 0
-for a in $(cat /proc/cmdline 2>/dev/null); do
-  case "$a" in pk_mdev=off|nomdev) echo "pk-boot: mdev off (pk_mdev=off)"; exit 0 ;; esac
-done
-[ -e /bin/mdev ] || { echo "pk-boot: /bin/mdev nahi (busybox mdev applet) - hotplug hook skip"; exit 0; }
-busybox mdev -s 2>/dev/null || true
-mkdir -p /etc/mdev 2>/dev/null
+say()  { printf 'pk-boot(mdev): %s\n' "$*"; }
+mark() { ( printf '### PK: %s ###\n' "$*" > /dev/console ) 2>/dev/null; ( printf '%s\n' "$*" > /dev/kmsg ) 2>/dev/null; }
+have() { command -v "$1" >/dev/null 2>&1; }
 
+for a in $(cat /proc/cmdline 2>/dev/null); do
+  case "$a" in pk_mdev=off|nomdev) say "band (pk_mdev=off)"; exit 0 ;; esac
+done
+
+if [ ! -x /bin/mdev ] && ! have mdev; then
+  say "busybox mdev applet nahi mila - hook skip"
+  mark "MDEV-SKIP (no mdev applet)"
+  exit 0
+fi
+
+mkdir -p /etc/mdev 2>/dev/null
 cat > /etc/mdev/hotplug.sh <<'HOOK'
 #!/bin/sh
-# $1 action (add/remove), $MODALIAS / $DEVTYPE / $INTERFACE mdev se
-case "$ACTION" in
-  add|"")
+# /etc/mdev.conf ke @action se chalta hai; vars mdev set karta hai
+case "${ACTION:-add}" in
+  add|remove)
     [ -n "${MODALIAS:-}" ] && modprobe -q "$MODALIAS" 2>/dev/null
-    # net device aaya aur DHCP configured hai to ek baar try (idempotent)
     if [ -n "${INTERFACE:-}" ] && grep -q '^PK_DHCP=yes' /etc/default/pk 2>/dev/null; then
-      command -v pk-net >/dev/null 2>&1 && pk-net dhcp >/dev/null 2>&1 || true
+      have() { command -v "$1" >/dev/null 2>&1; }
+      have pk-net && pk-net dhcp >/dev/null 2>&1
     fi
     ;;
-  remove) : ;;
 esac
 exit 0
 HOOK
-chmod 755 /etc/mdev/hotplug.sh
+chmod 755 /etc/mdev/hotplug.sh 2>/dev/null
 
 if [ ! -f /etc/mdev.conf ]; then
   cat > /etc/mdev.conf <<'CONF'
-# busybox mdev config - /dev ke nodes (mode 666 jo char/block hon)
-console		0:5	600
-fb0		0:44	660
-input/.*	0:0	600
-tty[0-9]*	0:5	666
-.*		0:0	666	@/etc/mdev/hotplug.sh
+# busybox mdev: /dev nodes + add-action hook (@)
+console        0:5      600
+fb0            0:44     660
+input/.*       0:0      600
+tty[0-9]*      0:5      666
+.*             0:0      666   @/etc/mdev/hotplug.sh
 CONF
 fi
-printf '/bin/mdev\n' > /proc/sys/kernel/hotplug 2>/dev/null && hp=/bin/mdev || hp=$(cat /proc/sys/kernel/hotplug 2>/dev/null)
-printf '### PK: MDEV-OK (hotplug=%s) ###\n' "${hp:-?}" > /dev/console 2>/dev/null
-echo "pk-boot: mdev ready (hotplug=${hp:-?})"
+
+say "coldplug: /dev scan (mdev -s)"
+busybox mdev -s >/dev/null 2>&1
+rc=$?
+
+lis=0
+if [ -x /bin/uevent ] || have uevent; then
+  ( setsid busybox uevent busybox mdev >/dev/null 2>&1 & ) 2>/dev/null && lis=1
+fi
+# purana interface agar maujood ho to wo bhi bhar dete hain (harmless bonus)
+if [ -e /proc/sys/kernel/hotplug ]; then
+  printf '/bin/mdev\n' > /proc/sys/kernel/hotplug 2>/dev/null || true
+fi
+
+if [ "$lis" = 1 ]; then
+  say "mdev ready (uevent listener on, coldplug rc=$rc)"
+  mark "MDEV-OK (uevent listener + coldplug, rc=$rc)"
+else
+  say "mdev ready (sirf coldplug - uevent applet nahi mila)"
+  mark "MDEV-COLDPLUG (rc=$rc)"
+fi
 exit 0

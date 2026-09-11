@@ -44,6 +44,8 @@ tools/verify-usb.sh /dev/sdX build/manifest.txt      # host se verify: wahi byte
 
 `verify-usb.sh` ka result `ok=N fail=0` ho to media sahi hai. `fail>0` → dobara dd.
 
+VM me pehle try karna ho to: **[VM-TEST.md](VM-TEST.md)** (QEMU/VirtualBox/VMware settings + expected markers).
+
 ## 2. PC se boot
 
 1. BIOS/UEFI setup me: **Secure Boot OFF** (hamara GRUB unsigned hai), boot menu se USB select.

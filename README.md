@@ -320,6 +320,7 @@ Boot options (GRUB me `e`, ya menu entries `g`/`k`): `pk_check=1` (ya `pk_check=
 | doc | kis liye |
 |---|---|
 | [docs/PENDRIVE.md](docs/PENDRIVE.md) | **aapke real pendrive test ka sheet** (kya karna hai, kaunsi line pass mani jaayegi, kya bhejna hai) |
+| [docs/VM-TEST.md](docs/VM-TEST.md) | **VirtualBox / VMware / QEMU me chalane ka sheet** (settings, commands, expected `### PK:` markers, atakne par fix) |
 | [docs/IOS-ANDROID.md](docs/IOS-ANDROID.md) | iOS/Android: kya chalta hai, kyun nahi chalta, kaunse raaste actually kaam karte hain |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | modern desktop-OS requirements (scheduling/GPU/memory/security/IPC) — is OS me kaun karta hai, kaise verify karein, kya possible nahi |
 | [docs/APPS.md](docs/APPS.md) | App Runtime (Debian userland + apt + Wine) |

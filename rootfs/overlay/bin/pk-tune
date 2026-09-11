@@ -145,7 +145,17 @@ report() {
   tp=''
   for t in /dev/tpm0 /dev/tpmrm0; do [ -e "$t" ] && tp="$tp $t"; done
   printf '  tpm         : %s\n' "${tp:- '(no TPM device - measured boot/VBS ke liye chahiye)'}"
-  printf '  hotplug     : %s\n' "$(rd /proc/sys/kernel/hotplug || echo '(none)')"
+  hl=$(rd /proc/sys/kernel/hotplug)
+  lst=0
+  for d in /proc/[0-9]*; do
+    c=$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null)
+    case "$c" in *"uevent busybox mdev"*) lst=1; break ;; esac
+  done
+  if [ "$lst" = 1 ]; then hp="uevent+mdev listener chal raha hai${hl:+ (sysctl: $hl)}"
+  elif [ -n "$hl" ]; then hp="sysctl hotplug=$hl (listener nahi)"
+  else hp="(koi hotplug handler nahi - pk_mdev=off?)"
+  fi
+  printf '  hotplug     : %s\n' "$hp"
   printf '  swap        : %s MB total\n' "$(( $(awk '/^SwapTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 0) / 1024 ))"
   printf '  cgroup      : %s  (weights: apps=200 bg=20)\n' "$( [ -f $CG/cgroup.controllers ] && echo 'v2 ready' || echo 'none/read-only')"
   printf '  sandbox     : unshare=%s namespaces=%s\n' "$(have unshare && echo yes || echo no)" \
