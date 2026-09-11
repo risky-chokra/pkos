@@ -108,6 +108,13 @@ nahi karta. Fix: Settings → System → Motherboard → **Enable Secure Boot un
 ya **Enable EFI untick** kar do (BIOS path QA me verified hai ✓). ISO aapke VM me sahi attach thi:
 VBox log ka `LUN#2: CD/DVD sectors=358322` × 2048 = 733 843 456 B = bilkul wahi file ✓)
 
+### 2d. Doosra VM-round: headless ISO + initrd-guard (aur ek panic jo humne khud ko sikhaya)
+
+| kya | kyun | proof |
+|---|---|---|
+| `make iso PK_SERIAL=1` → `pkos-1.0-serial.iso` (release ka naya asset) | "screen hi nahi aayi" wali halat me bhi poora boot padhne layak: default entry me `console=ttyS0,115200n8` | QEMU `-display none` + `-serial file:` me GRUB menu (12 entries) + `### PK: BOOT-OK … ###` + `login: root / pk` + `pk:/root#` prompt ✓ (`pkos-vm-serial-demo.log`) |
+| `scripts/mk-initrd`: **static busybox ka hard check** | is sandbox me ek baar `busybox-static` absent tha → initrd me dynamic busybox gaya → `/bin/sh: libresolv.so.2 … ` + `Kernel panic - not syncing: Attempted to kill init!` = **bilkul khali screen**. Aise me build ab chup-chaap toota ISO banane ke bajaye die karta hai (`PK_ALLOW_DYNAMIC_BUSYBOX=1` do to lib closure copy karke chale bhi deta hai) | `make doctor` me "static busybox: /bin/busybox" row ✓ |
+
 ## 3. Is round me jo bug pakde aur fix kiye
 
 1. **pk-x ka jhootha success** — x-env likh dena = "session chal gaya" (weston mar bhi

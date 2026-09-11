@@ -25,11 +25,33 @@ if [ -z "$BUSYBOX" ]; then
   done
 fi
 [ -n "$BUSYBOX" ] || die "static busybox nahi mila -> sudo apt install busybox-static"
+# initrd me koi libc nahi jaata -> dynamic busybox se /init fail hota hai aur
+# kernel panic milta hai (screen bilkul khali). Isliye ya static chahiye, ya
+# POORI lib closure initrd me copy karna padega (PK_ALLOW_DYNAMIC_BUSYBOX=1).
+if ldd "$BUSYBOX" 2>/dev/null | grep -q '=> /'; then
+  if [ "${PK_ALLOW_DYNAMIC_BUSYBOX:-0}" != 1 ]; then
+    die "$BUSYBOX dynamic hai (initrd me libc nahi hoga -> /init panic). Fix: sudo apt-get install -y busybox-static , ya PK_BUSYBOX=<static-path> do, ya samajhdari ke saath PK_ALLOW_DYNAMIC_BUSYBOX=1 (tab lib closure khud copy ho jaayega)"
+  fi
+  warn "dynamic busybox use ho raha hai -> uska lib closure initrd me copy kar rahe hain"
+  BUSYBOX_DYNAMIC=1
+else
+  BUSYBOX_DYNAMIC=0
+fi
 
 log "initrd staging: $IR"
 wipe "$IR"
 for d in bin sbin dev proc sys run mods mnt etc newroot ro tmp; do mkdir -p "$IR/$d"; done
 install -m 0755 "$BUSYBOX" "$IR/bin/busybox"
+if [ "${BUSYBOX_DYNAMIC:-0}" = 1 ]; then
+  ldd "$BUSYBOX" 2>/dev/null | awk '/=> \//{print $3}' | while read -r l; do
+    [ -f "$l" ] || continue
+    d=$(dirname "$l"); mkdir -p "$IR$d" 2>/dev/null
+    cp -pL "$l" "$IR$l" 2>/dev/null || true
+  done
+  for ld in $(ls /lib64/ld-linux-x86-64.so.2 /lib/ld-linux-aarch64.so.1 2>/dev/null | head -1); do
+    [ -f "$ld" ] || continue; mkdir -p "$IR$(dirname "$ld")"; cp -pL "$ld" "$IR$ld" 2>/dev/null || true
+  done
+fi
 "$IR/bin/busybox" --list | while read -r app; do
   case "$app" in ''|*/*) continue ;; esac
   for d in bin sbin; do

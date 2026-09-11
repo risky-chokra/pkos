@@ -49,6 +49,13 @@ fi
 mkdir -p "$STAGE/boot/grub"
 args=${KERNEL_CMDLINE:-"quiet loglevel=3"}
 [ -n "${PK_TEST_CMDLINE:-}" ] && args="$args $PK_TEST_CMDLINE"
+# PK_SERIAL=1 -> default entry me serial console bhi: VM jisme screen nahi dikhti
+# (headless / VBox display issue) wahan bhi GRUB menu + kernel log + ### PK: markers
+# ek file me mill jaate hain (VBox: --uart1 0x3F8 4 --uartmode1 file <path>)
+if [ "${PK_SERIAL:-0}" = 1 ]; then
+  args="$args console=tty0 console=ttyS0,115200n8"
+  log "  PK_SERIAL=1 -> default args me serial console (VM headless debug)"
+fi
 sed -e "s|@ARGS@|$args|g" \
     -e "s|@LABEL@|${ISO_LABEL:-PKOS}|g" \
     -e "s|@VER@|${OS_VERSION:-1.0}|g" \

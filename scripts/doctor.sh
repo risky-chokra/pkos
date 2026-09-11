@@ -27,6 +27,8 @@ ok "lnxboot.img optional (grub-mkrescue khud sambhal lega)"
 needf /usr/lib/grub/x86_64-efi/modinfo.sh
 echo "-- live image ka content --"
 needf /bin/busybox
+  bbk=$(for c in /bin/busybox /usr/bin/busybox /bin/busybox.static; do [ -x "$c" ] || continue; ldd "$c" 2>/dev/null | grep -q '=> /' || { echo "$c"; break; }; done)
+  [ -n "${bbk:-}" ] && ok "static busybox: $bbk" || bad "busybox STATIC nahi mila (initrd ke liye zaroori) -> sudo apt-get install -y busybox-static"
 if ldd /bin/busybox >/dev/null 2>&1; then warn "/bin/busybox dynamically linked hai (chal jayega, par static better: busybox-static)"; else ok "/bin/busybox static"; fi
 need blkid
 need parted

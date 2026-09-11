@@ -163,3 +163,16 @@ dmesg | grep PK          # /dev/kmsg me bhi jaate hain
 | `initrd staging: No such file or directory` | `make initrd` se pehle `make live` skip hua | `make iso` (ya `make clean-rootfs && make iso`) |
 | `! not on host, skipping: xyz` | wo tool host pe nahi, live image me nahi jayega | us package ko install karo ya `config/live-bins.txt` se hatao |
 | ISO 4 GiB se badi ban rahi | `-allow-limited-size` lagega | `SQUASH_COMP=xz` karo ya `config/live-modules.txt` trim karo |
+
+## Headless / no-screen VM ke liye ISO (serial console default)
+```sh
+make iso OUT=build/pkos-serial.iso PK_SERIAL=1
+```
+`PK_SERIAL=1` default GRUB entry me `console=tty0 console=ttyS0,115200n8` add karta hai, isliye
+VirtualBox/VMware me screen na bhi dikhe to serial-port->file me GRUB menu + kernel log +
+`### PK: …` markers + live root shell mil jaati hai (VM-TEST.md me VBox ki `--uartmode1 file` trick).
+
+## Initrd ka busybox STATIC hona zaroori hai
+`scripts/mk-initrd` ab check karta hai: dynamic busybox milne par **die** (pehle wo initrd me
+chala jaata tha aur `/init` -> `Attempted to kill init!` kernel panic deta tha — screen bilkul khali).
+Jaante-bujhke dynamic chahiye to `PK_ALLOW_DYNAMIC_BUSYBOX=1` (initrd me lib closure khud copy ho jaata hai).

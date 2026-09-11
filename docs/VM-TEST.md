@@ -5,7 +5,9 @@ VM test = **image + boot + install + apps layer** ka fast check. Jo cheezein VM 
 Wi-Fi, BIOS/UEFI ka Secure Boot, aur terahz keyboard/touchpad. Unke liye pendrive chahiye
 (sheet: [PENDRIVE.md](PENDRIVE.md)).
 
-## 0. Kaunsi ISO
+## 0. Kaunsi ISO (VM ke liye)
+VM me agar display problema ho to **`pkos-1.0-serial.iso`** (same base OS, serial console default ON) use karo ✓
+
 - **`pkos-1.0-apps.iso`** (700 MiB) = base OS + App Runtime (apt/Wine/weston) — **ye attach karo**
 - `pkos-1.0.iso` (84 MiB) = base only (apps/GUI test nahi honge)
 
@@ -94,6 +96,32 @@ Do theek raaste (koi ek):
   **“Enable Secure Boot” *untick*** karo. (QEMU/OVMF me bhi yahi: `...,secure-boot=off` ya plain `-bios OVMF_CODE.fd`.)
 
 Confirm karne ke liye VM ke baad: `VBoxManage showvminfo "<vm>" | grep -iE "firmware|secure"`
+
+### Paste-able: VBoxManage se ek hi baar me sahi VM (screen wali halat se bahar)
+Windows PowerShell me (VBox install dir se), ya Linux par as-is:
+```
+& "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" createvm --name pkos --register --ostype "Other Linux (64-bit)"
+& "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" modifyvm pkos --firmware bios --memory 3072 --cpus 2 --vram 32 --graphicscontroller vmsvga --accelerate3d off --ioapic on --nic1 nat --nicertype82545em --boot1 dvd --boot2 disk --bootnone on
+& "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" createmedium disk --filename $HOME\VirtualBox VMs\pkos-disk.vdi --size 40960 --format VDI
+& "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" storagectl pkos --name sata --add sata --controller IntelAhci
+& "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" storageattach pkos --storagectl sata --port 0 --device 0 --type hdd --medium $HOME\VirtualBox VMs\pkos-disk.vdi
+& "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" storageattach pkos --storagectl sata --port 1 --device 0 --type dvddrive --medium C:\Users\you\Downloads\pkos-1.0-apps.iso
+& "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe" startvm pkos --type gui
+```
+(`--firmware bios` line hi Secure-Boot wali problem khatam karti hai. EFI test karna ho:
+`--firmware efi` ke saath `VBoxManage modifyvm pkos --firmware efi --bioslogofadein off` aur
+**`--uart1` wala serial-port config** dekh lo neeche.)
+
+### Screen hi na aaye? Serial-port -> file (VM headless, poori boot text file me)
+```
+VBoxManage modifyvm pkos --uart1 0x3F8 4 --uartmode1 file C:\Users\you\pk-serial.log
+```
+Do raaste:
+- **`pkos-1.0-serial.iso`** (release ka 8th asset): isme default entry me hi
+  `console=tty0 console=ttyS0,115200n8` hai → GRUB menu se kernel, `### PK:` markers aur
+  **live root shell** sab us file me dikhte hain (yaani bina display ke bhi poora test) ✓
+  Normal ISO me `c` (serial console) entry bhi yahi karti hai, par wo menu dikhne par hi select ho sakti hai.
+- Apne build me: `make iso OUT=build/pkos-serial.iso PK_SERIAL=1` (ya `KERNEL_CMDLINE="quiet loglevel=3 console=tty0 console=ttyS0,115200n8"`)
 
 ### VirtualBox (7.x) — settings
 | setting | value |
