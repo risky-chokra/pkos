@@ -79,7 +79,23 @@ qemu-system-x86_64 -machine q35 -cpu max -smp 2 -m 2048 \
 
 ## 2. VirtualBox / VMware settings
 
-### VirtualBox (7.x)
+### ⚠️ Sabse common fail: UEFI + Secure Boot ON (VirtualBox 7.x)
+Hamara GRUB **unsigned** hai, isliye UEFI Secure Boot on hone par OVMF use load hi nahi karta —
+screen par kuch nahi/aap EFI shell dekh sakte ho, aur `VBox.log` me ye line dikhti hai:
+
+```
+Firmware type: UEFI
+Secure Boot: Enabled        <- ye on hai to ISO boot nahi hogi
+```
+
+Do theek raaste (koi ek):
+- **Simple**: Settings → System → Motherboard → **Enable EFI** *untick* (Legacy BIOS) — hamari QA isi path pe hai.
+- **UEFI test karna ho**: Enable EFI **on** rakho, aur uske neeche aane wala
+  **“Enable Secure Boot” *untick*** karo. (QEMU/OVMF me bhi yahi: `...,secure-boot=off` ya plain `-bios OVMF_CODE.fd`.)
+
+Confirm karne ke liye VM ke baad: `VBoxManage showvminfo "<vm>" | grep -iE "firmware|secure"`
+
+### VirtualBox (7.x) — settings
 | setting | value |
 |---|---|
 | Type / Version | Linux / **Other Linux (64-bit)** |
@@ -90,7 +106,7 @@ qemu-system-x86_64 -machine q35 -cpu max -smp 2 -m 2048 \
 | Storage 1 (IDE/SATA secondary master ya SATA) | `pkos-1.0-apps.iso` (Live ISO) |
 | Storage 2 (SATA) | 40 GB VDI (install test ke liye) |
 | Display | Video RAM 128 MB, **3D acceleration OFF** (hamara GUI Xvfb se bhi chalta hai; on karne par GPU init fail ho sakta hai) |
-| System → Motherboard → **Enable EFI** | test UEFI path → on; Secure Boot **off** rakho |
+| System → Motherboard → **Enable EFI** | UEFI test ke liye on, par **Secure Boot off** (upar wala box) |
 | Boot order | Optical pehla |
 
 ### VMware Workstation / Player
@@ -107,6 +123,13 @@ template choose karo; better: Generation-1 + ISO attach. (Hyper-V par our live i
 `hv_storvsc` modules chahiye — hamare image me nahi, isliye **VirtualBox/VMware/QEMU preferred**.)
 
 ---
+
+### Serial log kaise nikalein (mujhe bhejne ke liye useful)
+VirtualBox: Settings → Serial Ports → Port 1 → **Check "Enable Serial Port"**, Port Mode =
+**Raw File / Log File**? (VBox me "File" mode chunein), Path = `C:\Users\you\pk-serial.log`,
+**Connect to existing file = off**. Phir GRUB entry me `e` dabakar line ke aage add karo:
+`console=ttyS0,115200n8 pk_check=1 pk_selftest pk_poweroff`
+→ poori boot log file me aa jaayegi (markers + pk-check table).
 
 ## 3. VM me andar jaake ye 8 commands (expected output ke saath)
 
