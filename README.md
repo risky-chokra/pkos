@@ -225,7 +225,8 @@ pk_media=/dev/sdb pk_install=auto pk_silent pk_halt pk_rootpw=MeraPass
   root par ye **jaanboojh ke** skip hota hai (warna swap = RAM khana); installed system ya
   PK-PERSIST (ext4) par `/persistence/pk-swapfile` (live me persist mount yahi hai) ban ke `swapon`
   ho jaata hai. Marker:
-  `### PK: TUNE-SWAP-OK (NM) ###` / `TUNE-SWAP-SKIP`. Manual: `pk-tune swap 6144`, `pk-tune swap 0` (off).
+  `### PK: TUNE-SWAP-OK (NM) ###` / `TUNE-SWAP-SKIP`. Manual: `pk-tune swap 2048` (MB), `pk-tune swap 0` (off).
+  (Zyadatar logon ke liye ye **on karne ki zarurat nahi** - live session me skip hi sahi behavior hai.)
   `PK_SWAP=` se /etc/default/pk me default.
 - `pk_mdev=off` → busybox mdev hotplug hook band (default on: plug-and-play modprobe)
 - Baad me bhi: `pk-net dhcp` / `pk-net status` / `pk-ssh start`

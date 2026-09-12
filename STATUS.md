@@ -224,9 +224,9 @@ User bola "use 6gb swap" → do kaam:
 3. QA: stage 0 ke test ISO me `pk_swap=256`; stage 1 me naya check
    `PK: TUNE-SWAP-SKIP` (live guard kaam karta hai) aur stage 3 (installed ext4) me
    `PK: TUNE-SWAP-OK` (asli swapfile + swapon) — yaani dono side prove hote hain.
-4. VM settings: apps ISO ke liye **6144 MB RAM** recommended (docs/VM-TEST.md ki table update).
+4. VM settings pehle maine "6144 MB recommended" likh diya tha - **wo galat / overkill tha** (user ka matlab "6 GB swap" = *sandbox host* ka swap, taaki kaam karte waqt OOM na ho; ISO ya guest ke liye 6 GB ki zarurat nahi). Ab docs me verified numbers: base ISO 768 MB (QA default 640 MB), apps ISO 2048 MB.
 
-### 4h. 6 GB (user: "use 6gb swap") — sandbox me bhi prove ho gaya
+### 4h. Host par 6 GB swap (user ka idea, OOM bachane ke liye) + usse jo 6 GB guest test possible hua
 
 Host (sandbox) ke paas sirf 1984 MB RAM tha, isliye pehle 6 GB guest test atak gaya tha.
 User ke kehne par host par 6 GB swapfile banaya (`dd` + `mkswap` + `swapon`) — tab:
@@ -238,11 +238,30 @@ User ke kehne par host par 6 GB swapfile banaya (`dd` + `mkswap` + `swapon`) —
 - `scripts/run-test.sh` ka VM-RAM cap ab **RAM + SwapFree** dekhta hai (pehle sirf `MemAvailable`;
   isliye host par swap hote hue bhi QA khud 640 MB par simat jaata tha). `PK_QEMU_MEM=6144 make test`
   → bina shrink-warning ke **15/15** (stages 0,1,1b,1d) ✓
-- Note: ye VM ki baat hai; aapke physical PC/pendrive par 6 GB RAM ki zarurat nahi — 2 GB bhi
-  base ISO ke liye kaafi hai, apps ISO ke liye 4-6 GB comfortable hai.
+- **Clarification (user ne theek kaha):** "use 6gb swap" ka matlab *sandbox host* par swap tha taaki build/QA ke waqt OOM na ho — 6 GB ki ISO banane ka koi irada nahi tha.
+  Published assets ka asli size: `pkos-1.0.iso` 88 031 232 B (84 MB), `pkos-1.0-serial.iso` 88 031 232 B, `pkos-1.0-apps.iso` 734 007 296 B (700 MB).
+  6 GB guest RAM sirf ek *test config* thi (`-m 6144`); guest ke liye 2048 MB kaafi hai aur host swap sandbox ki taraf se laga, ISO me kuch nahi gaya.
 
 **Abhi bhi unchecked:** aapki asli VirtualBox window (hamare paas sirf aapka headless log tha),
 physical GPU/UEFI machine, Wi-Fi association, real `.exe` GUI, macOS/Android guest, LUKS, Secure-Boot signing.
+
+### 4i. "6 GB ISO" wali galatfehami — sizes ka record
+
+User ne clear kiya: 6 GB swap = **sandbox host** ka (OOM se bachne ke liye), 6 GB ISO nahi chahiye.
+Verify kiya (GitHub se anonymous HEAD, `content-length`):
+
+| asset | size |
+|---|---|
+| `pkos-1.0.iso` | 88 031 232 B = **84 MB** |
+| `pkos-1.0-serial.iso` | 88 031 232 B = **84 MB** |
+| `pkos-1.0-apps.iso` | 734 007 296 B = **700 MB** (zyada tar Debian App Runtime: apt/Wine/weston) |
+| `pkos-1.0-src.tar.gz` / `.bundle` / sha256 | 170 748 / 233 377 / 693 B |
+
+Koi 6 GB artifact kabhi bana hi nahi. Galati sirf **docs/release-body ki guidance** me thi
+("VM RAM 6144 MB ideal") — wo is commit me verified numbers se badli: base ISO 768 MB
+(`make test` ka default `PK_QEMU_MEM:-640`), apps ISO 2048 MB, aur `pk_swap` ka example
+`auto` (6144 nahi). Chhota download chahiye to: **base ISO (84 MB)** + runtime ko pendrive ke
+free partition par `pk-runtime --setup <file>` se rakho (ISO me embed karne ki zarurat nahi).
 
 ## 5. Aapke PC pe ab kya karna hai (emulator → pendrive → install)
 

@@ -127,8 +127,8 @@ Do raaste:
 | setting | value |
 |---|---|
 | Type / Version | Linux / **Other Linux (64-bit)** |
-| RAM | **6144 MB ideal** (apps ISO + GUI + toram ke liye); minimum 2048 MB. 2 GB se kam par /tmp (RAM-backed overlay) pressure se boot atak sakta hai |
-| Page Execution | off rakho (host RAM 6 GB de rahi ho to zarurat nahi); VM ke andar swap chahiye to boot option `pk_swap=6144` — live me wo guard se skip hota hai, installed/PK-PERSIST par chalta hai |
+| RAM | base ISO: **768 MB bhi kaafi** (`make test` ka default hi 640 MB hai - usi par live-boot QA pass hota hai). apps ISO: **2048 MB** (GUI + apt + runtime ke liye comfortable); 1 GB ke aas-paas par /tmp (RAM-backed overlay) pressure se `APP-APPIMAGE-SKIP` type skips dikhe the - image ka bug nahi, RAM ki kami. 4-6 GB dene ki **zarurat nahi**, bas `toram` + ek saath bahut saari apps chalani ho to kaam aata hai |
+| Page Execution / ballooning | default rakh do; VM ke andar swap ki zarurat nahi (hamara overlay RAM me hota hai). Chaaho to boot option `pk_swap=auto` (RAM/2, 1-8 GB clamp) - live me guard se skip (tmpfs par swapfile = RAM khana), installed/PK-PERSIST par `pk-swapfile` ban ke `swapon` |
 | CPU | 2 core, **Enable I/O APIC** on |
 | Chipset | ICH9 (PIIX9 se accha), *Nested PT* on agar available |
 | Network | **NAT**, adapter type = **Paravirt NIC (virtio-net)** ya Intel PRO/1000 MT (82545EM) |
