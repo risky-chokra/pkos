@@ -226,6 +226,24 @@ User bola "use 6gb swap" → do kaam:
    `PK: TUNE-SWAP-OK` (asli swapfile + swapon) — yaani dono side prove hote hain.
 4. VM settings: apps ISO ke liye **6144 MB RAM** recommended (docs/VM-TEST.md ki table update).
 
+### 4h. 6 GB (user: "use 6gb swap") — sandbox me bhi prove ho gaya
+
+Host (sandbox) ke paas sirf 1984 MB RAM tha, isliye pehle 6 GB guest test atak gaya tha.
+User ke kehne par host par 6 GB swapfile banaya (`dd` + `mkswap` + `swapon`) — tab:
+- **apps ISO @ `-m 6144` + `pk_swap=6144`** → `VERIFY-OK`, `BOOT-OK`, `MDEV-OK`, `DISPLAY-OK (text=on)`,
+  `RUNTIME-OK src=pk-runtime.sqfs`, `NET-OK (10.0.2.15)`, `CHECK-OK (7, 0 fail)`, `APP-ELF/SCRIPT-OK`,
+  `APP-SANDBOX-OK`, `RUNTIME-EXEC-OK`, `APPS-OK`, `SELFTEST-OK` — 160 s me poora boot ✓
+- live par `pk_swap=6144` → `TUNE-SWAP-SKIP` + reason `skip /var/tmp (fs=overlay: … swap ka matlab RAM khana hota)`
+  ✓ guard sahi kaam karta hai (installed/PK-PERSIST par `TUNE-SWAP-OK` — QA stage 3 me 256 M se prove ho chuka hai)
+- `scripts/run-test.sh` ka VM-RAM cap ab **RAM + SwapFree** dekhta hai (pehle sirf `MemAvailable`;
+  isliye host par swap hote hue bhi QA khud 640 MB par simat jaata tha). `PK_QEMU_MEM=6144 make test`
+  → bina shrink-warning ke **15/15** (stages 0,1,1b,1d) ✓
+- Note: ye VM ki baat hai; aapke physical PC/pendrive par 6 GB RAM ki zarurat nahi — 2 GB bhi
+  base ISO ke liye kaafi hai, apps ISO ke liye 4-6 GB comfortable hai.
+
+**Abhi bhi unchecked:** aapki asli VirtualBox window (hamare paas sirf aapka headless log tha),
+physical GPU/UEFI machine, Wi-Fi association, real `.exe` GUI, macOS/Android guest, LUKS, Secure-Boot signing.
+
 ## 5. Aapke PC pe ab kya karna hai (emulator → pendrive → install)
 
 ```sh
