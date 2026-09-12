@@ -33,7 +33,8 @@ PK_KERNEL  ?=
 PK_MODULES ?=
 PK_BUSYBOX ?=
 SQUASH_COMP   ?= auto
-KERNEL_CMDLINE?= quiet loglevel=3
+# canonical default config/live.conf se match karna chahiye (consoleblank: kaali-screen fix)
+KERNEL_CMDLINE?= quiet loglevel=3 consoleblank=0 vt.global_cursor_default=1
 PK_QEMU_MEM?= 2048
 export SUDO QEMU PK_KERNEL PK_MODULES PK_BUSYBOX SQUASH_COMP KERNEL_CMDLINE PK_QEMU_MEM
 

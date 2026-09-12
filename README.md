@@ -221,6 +221,12 @@ pk_media=/dev/sdb pk_install=auto pk_silent pk_halt pk_rootpw=MeraPass
 - `pk_wifi=<ssid>:<pw>` → Wi-Fi se connect (experimental, runtime me wpasupplicant)
 - `pk_verify=1|require` → boot par `/live/pk.sqfs` ka sha256 sidecar se verify (payload integrity)
 - `pk_tune=report|desktop|hybrid` → S60tune hook (CPU/IO/IPC/cgroup tuning; `PK_TUNE=` se default)
+- `pk_swap=<MB>|auto|off` → boot par swapfile (auto = RAM/2, 1–8 GB clamp). Live ke tmpfs/overlay
+  root par ye **jaanboojh ke** skip hota hai (warna swap = RAM khana); installed system ya
+  PK-PERSIST (ext4) par `/persistence/pk-swapfile` (live me persist mount yahi hai) ban ke `swapon`
+  ho jaata hai. Marker:
+  `### PK: TUNE-SWAP-OK (NM) ###` / `TUNE-SWAP-SKIP`. Manual: `pk-tune swap 6144`, `pk-tune swap 0` (off).
+  `PK_SWAP=` se /etc/default/pk me default.
 - `pk_mdev=off` → busybox mdev hotplug hook band (default on: plug-and-play modprobe)
 - Baad me bhi: `pk-net dhcp` / `pk-net status` / `pk-ssh start`
 

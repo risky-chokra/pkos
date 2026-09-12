@@ -1,0 +1,92 @@
+#!/bin/sh
+# pk's OS boot hook :: display/backlight sanity - "GRUB dikha, phir screen kaali" ka middle-ware
+#   boot option: pk_display=off se band
+# Kya karta hai:
+#   1) fbcon/DRI ke blank flag off (echo 0 > .../blank) + VT DPMS escape (ESC[9;0]) + cursor on
+#   2) laptop backlight ON + brightness max par (bl_power / brightness)
+#   3) tty1 par ek line, aur /etc/motd ke TOP par display status
+#      (profile motd ko `head -9` se print karta hai -> isliye append nahi, prepend)
+#   4) markers: ### PK: DISPLAY-OK (text=on fb=N drm=M) ### ya ### PK: DISPLAY-NOCONSOLE ###
+# Kuch bhi fail ho to bhi boot chalta rahega (set -e nahi, sab guarded).
+set -u
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+say() { printf 'pk-display: %s\n' "$*"; }
+mark() { ( printf '### PK: %s ###\n' "$*" > /dev/console ) 2>/dev/null; ( printf '%s\n' "$*" > /dev/kmsg ) 2>/dev/null; }
+
+for a in $(cat /proc/cmdline 2>/dev/null); do
+  case "$a" in pk_display=off|nodisplay) exit 0 ;; esac
+done
+
+fbn=0; drm=0
+for f in /sys/class/graphics/fb*; do
+  [ -e "$f/blank" ] || continue
+  printf '0' > "$f/blank" 2>/dev/null || true
+  fbn=$((fbn + 1))
+done
+for c in /sys/class/drm/card*; do [ -e "$c" ] && drm=$((drm + 1)); done
+
+# VT DPMS off + cursor on (setterm applet busybox me nahi hota, isliye raw escape)
+for t in /dev/tty1 /dev/tty2 /dev/tty3 /dev/tty4; do
+  [ -w "$t" ] || continue
+  printf '\033[9;0]\033[?25h' > "$t" 2>/dev/null || true
+done
+
+# backlight (laptop: panel off = kaali screen)
+bl=''
+for b in /sys/class/backlight/*; do
+  [ -d "$b" ] || continue
+  bl="$bl ${b##*/}"
+  if [ -e "$b/bl_power" ]; then printf '0' > "$b/bl_power" 2>/dev/null || true; fi
+  if [ -e "$b/max_brightness" ] && [ -e "$b/brightness" ]; then
+    mx=$(cat "$b/max_brightness" 2>/dev/null || true)
+    if [ -n "${mx:-}" ]; then printf '%s' "$mx" > "$b/brightness" 2>/dev/null || true; fi
+  fi
+done
+
+# /dev/fb0 na hona = "screen kaali", ye galat inference hai: kernel ka text console
+# (vgacon) bina kisi fb device ke bhi theek print karta hai. Asli signal /proc/consoles
+# hai - wahan tty0 (foreground VT) ya tty1..9 listed ho to screen par text aayega.
+con=''
+[ -r /proc/consoles ] && con=$(awk '{print $1}' /proc/consoles 2>/dev/null | tr '\n' ' ')
+# screen console = tty0 ya tty1..tty9; ttyS* sirf serial hai (screen nahi)
+text=0
+for c in $con; do
+  case "$c" in
+    tty0|tty1|tty2|tty3|tty4|tty5|tty6|tty7|tty8|tty9) text=1 ;;
+  esac
+done
+if [ "$text" = 0 ] && { [ "$fbn" != 0 ] || [ "$drm" != 0 ]; }; then text=1; fi
+if [ "$text" = 0 ] && [ -e /dev/tty1 ] && [ -w /dev/tty1 ]; then text=1; fi
+
+nofb=0
+if [ "$text" = 0 ]; then nofb=1; fi
+
+# status line: /run/pk/display.txt me poori detail, motd ke top par ek line
+if [ "$nofb" = 1 ]; then
+  line="!! display: koi screen console nahi (consoles:${con:- none}) - screen par kuch nahi aayega. GRUB me b=nomodeset+serial, ya pkos-1.0-serial.iso"
+else
+  line="display: screen console ok (consoles:$con) fb=$fbn drm=$drm blank=off${bl:+ backlight:$bl}"
+fi
+mkdir -p /run/pk 2>/dev/null || true
+printf '%s\n' "$line" > /run/pk/display.txt 2>/dev/null || true
+printf 'pk-display: %s | blank-off + DPMS-off try kiya\n' "$line"
+if [ -f /etc/motd ] && ! grep -qs "pk-display-status" /etc/motd; then
+  tmp=/run/pk/motd.$$
+  if { printf '[ pk-display-status ] %s\n' "$line"; cat /etc/motd 2>/dev/null; } > "$tmp" 2>/dev/null; then
+    cat "$tmp" > /etc/motd 2>/dev/null || true
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+fi
+
+# early line tty1 par (boot ke 2-3 sec me hi pata chal jaata hai console zinda hai)
+if [ -w /dev/tty1 ]; then
+  printf '\npk'"'"'s OS: console zinda hai (fb=%s drm=%s backlight:%s)\n' "$fbn" "$drm" "${bl:- none}" > /dev/tty1 2>/dev/null || true
+fi
+
+if [ "$nofb" = 1 ]; then
+  say "screen console nahi mila (/proc/consoles:$con) - screen par kuch nahi aayega; serial console use karo (GRUB me b/c, ya pkos-1.0-serial.iso)"
+  mark "DISPLAY-NOCONSOLE (fb=$fbn drm=$drm consoles:${con:-none})"
+else
+  mark "DISPLAY-OK (text=on fb=$fbn drm=$drm${bl:+, bl:$bl})"
+fi
+exit 0

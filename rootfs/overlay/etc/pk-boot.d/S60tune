@@ -10,11 +10,27 @@ mark() { ( printf '### PK: %s ###\n' "$*" > /dev/console ) 2>/dev/null; ( printf
 
 mode=$(tr ' ' '\n' < /proc/cmdline 2>/dev/null | sed -n 's/^pk_tune=//p' | head -1)
 [ -n "$mode" ] || mode=$(sed -n 's/^PK_TUNE=//p' "$DEF" 2>/dev/null | head -1)
-[ -n "$mode" ] || exit 0
 case "$mode" in yes|on|1) mode=desktop ;; esac
 
 command -v pk-tune >/dev/null 2>&1 || { say "pk-tune nahi mila (image purani?)"; exit 0; }
 
+# --- swap: pk_swap=<MB>|auto|off (pk_tune mode se independent; PK_SWAP= se default) ---
+sw=$(tr ' ' '\n' < /proc/cmdline 2>/dev/null | sed -n 's/^pk_swap=//p' | head -1)
+[ -n "$sw" ] || sw=$(sed -n 's/^PK_SWAP=//p' "$DEF" 2>/dev/null | tr -d '"' | head -1)
+case "${sw:-}" in
+  off|0) say "swap: boot option ne off kiya" ;;
+  auto)
+    mt=$(awk '/^MemTotal/{print int($2/1024/2)}' /proc/meminfo 2>/dev/null)
+    [ "${mt:-0}" -lt 1024 ] && mt=1024
+    [ "$mt" -gt 8192 ] && mt=8192
+    sw=$mt ;;
+esac
+if [ -n "${sw:-}" ] && [ "$sw" != off ] && [ "$sw" != 0 ]; then
+  say "swap: $sw MB maanga (pk_swap=$sw)"
+  pk-tune swap "$sw" 2>&1 | sed 's/^/  /' || say "swap on nahi ho paya (fs ya jagah ka reason upar)"
+fi
+
+[ -n "$mode" ] || { say "mode nahi diya (sirf pk_swap ke liye hook chala); tuning skip"; exit 0; }
 say "mode=$mode"
 case "$mode" in
   report)  pk-tune report ;;

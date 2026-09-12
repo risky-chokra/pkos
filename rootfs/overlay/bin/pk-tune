@@ -297,17 +297,50 @@ net_tune() {
   done
 }
 
+# swapfile sirf un filesystems par banta hai jo swap support karte hain.
+# Live system ka / (overlayfs upper = tmpfs) par dd karna = RAM khana; isliye wahan SKIP.
+fstype_of() {
+  d=$1
+  if command -v findmnt >/dev/null 2>&1; then
+    findmnt -T "$d" -n -o FSTYPE 2>/dev/null | head -1
+    return 0
+  fi
+  best=''; bl=0
+  while read -r dev mp fs rest; do
+    case "$d" in
+      "$mp"*) [ ${#mp} -gt "$bl" ] && { best=$fs; bl=${#mp}; } ;;
+    esac
+  done < /proc/self/mounts
+  printf '%s' "$best"
+}
+avail_mb() { df -Pk "$1" 2>/dev/null | awk 'NR==2{print int($4/1024)}'; }
+
 swap_tune() {
   mb=${1:-1024}
   cur=$(awk '/^SwapTotal/{print $2}' /proc/meminfo 2>/dev/null)
   if [ "${mb:-0}" = 0 ]; then swapoff -a 2>/dev/null; say "swap off"; mark "TUNE-SWAP-OFF"; return 0; fi
+  case "$mb" in ''|*[!0-9]*) mb=1024 ;; esac
+  [ "$mb" -gt 65536 ] && mb=65536
   if [ "${cur:-0}" -gt 0 ]; then say "pehle se swap hai ($((${cur}/1024)) MB)"; return 0; fi
-  for d in /var/tmp /var /mnt/persist /root; do
+  for d in /persistence /mnt/persist /var/tmp /var /root; do
     [ -d "$d" ] || continue
-    case "$d" in /*) : ;; esac
     f=$d/pk-swapfile
+    fs=$(fstype_of "$d")
+    case "$fs" in
+      ext2|ext3|ext4|xfs|btrfs|f2fs) : ;;
+      *) say "skip $d (fs=${fs:-?}: yahan swapfile supported nahi - live ka / tmpfs/overlay hai, swap ka matlab RAM khana hota)"; continue ;;
+    esac
+    free=$(avail_mb "$d")
+    [ -n "${free:-}" ] || free=0
+    if [ "$free" -le "$((mb + 64))" ]; then
+      if [ "$free" -ge 320 ]; then
+        mb=$((free - 128)); say "jagah kam thi -> size ${mb} MB kar di (fs=$fs, free=${free} MB)"
+      else
+        say "skip $d (free ${free} MB < ${mb} MB chahiye)"; continue
+      fi
+    fi
     [ -w "$(dirname "$f")" ] || continue
-    printf '  try %s (%s MB) ...\n' "$f" "$mb"
+    printf '  try %s (%s MB, fs=%s) ...\n' "$f" "$mb" "$fs"
     # swapfile me holes nahi hone chahiye -> poora likhte hain (mkswap/swapon iske baad chalte hain)
     dd if=/dev/zero of="$f" bs=1M count="$mb" 2>/dev/null || { rm -f "$f"; continue; }
     chmod 600 "$f" 2>/dev/null
@@ -315,7 +348,7 @@ swap_tune() {
     swapon "$f" 2>/dev/null && { say "swap on: $f (${mb} MB)"; mark "TUNE-SWAP-OK (${mb}M)"; return 0; }
     rm -f "$f" 2>/dev/null
   done
-  warn "koi swapfile banane layak jagah nahi (live RAM me fstab 'none swap'? installed system me kaam karega)"
+  warn "koi swapfile banane layak jagah nahi (live me / = tmpfs/overlay -> installed system ya PK-PERSIST partition par chalega)"
   mark "TUNE-SWAP-SKIP"
   return 1
 }

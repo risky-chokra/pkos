@@ -9,3 +9,10 @@ PK_ISSUE=${PK_ISSUE:-yes}
 # + sysctls + cgroup weights (apps=200 / bg=20); hybrid = P/E cores detect karke daemons
 # ko efficiency cores par. Manual: pk-tune report | pk-tune desktop | pk-tune undo
 PK_TUNE=
+
+# swap: boot option pk_swap=<MB>|auto|off se (ya yahan default). '' = boot par swap mat chhedo.
+# auto = RAM/2 (1 GB se 8 GB ke beech clamp). Live me / tmpfs/overlay hota hai -> wahan ye
+# jaanboojh ke skip hota hai (warna swap = RAM khana); installed system (/var/tmp) ya
+# PK-PERSIST (/persistence) par swapfile ban ke swapon ho jaata hai.
+# Manual: pk-tune swap 6144  |  pk-tune swap 0 (off)
+PK_SWAP=${PK_SWAP:-}

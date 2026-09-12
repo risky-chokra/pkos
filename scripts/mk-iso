@@ -47,7 +47,15 @@ fi
 
 # grub menu (template se @ARGS@/@LABEL@/@VER@ bharte hain)
 mkdir -p "$STAGE/boot/grub"
-args=${KERNEL_CMDLINE:-"quiet loglevel=3"}
+# default GRUB args: config/live.conf ka KERNEL_CMDLINE hi canonical source hai
+# (pehle yahan hardcoded "quiet loglevel=3" tha -> live.conf me consoleblank=0 add
+#  karne ke baad bhi ISO ke menu me nahi aata tha; ab dono ek hi jagah se aate hain)
+if [ -z "${KERNEL_CMDLINE:-}" ] && [ -f "$PK_ROOT/config/live.conf" ]; then
+  KERNEL_CMDLINE=$(sed -n 's/^KERNEL_CMDLINE=.*:-//p' "$PK_ROOT/config/live.conf" \
+                   | head -1 | tr -d '"}')
+fi
+args=${KERNEL_CMDLINE:-"quiet loglevel=3 consoleblank=0 vt.global_cursor_default=1"}
+[ -n "$args" ] || args="quiet loglevel=3 consoleblank=0 vt.global_cursor_default=1"
 [ -n "${PK_TEST_CMDLINE:-}" ] && args="$args $PK_TEST_CMDLINE"
 # PK_SERIAL=1 -> default entry me serial console bhi: VM jisme screen nahi dikhti
 # (headless / VBox display issue) wahan bhi GRUB menu + kernel log + ### PK: markers

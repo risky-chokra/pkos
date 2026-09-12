@@ -127,7 +127,8 @@ Do raaste:
 | setting | value |
 |---|---|
 | Type / Version | Linux / **Other Linux (64-bit)** |
-| RAM | 2048 MB (GUI test ke liye 3072 better) |
+| RAM | **6144 MB ideal** (apps ISO + GUI + toram ke liye); minimum 2048 MB. 2 GB se kam par /tmp (RAM-backed overlay) pressure se boot atak sakta hai |
+| Page Execution | off rakho (host RAM 6 GB de rahi ho to zarurat nahi); VM ke andar swap chahiye to boot option `pk_swap=6144` — live me wo guard se skip hota hai, installed/PK-PERSIST par chalta hai |
 | CPU | 2 core, **Enable I/O APIC** on |
 | Chipset | ICH9 (PIIX9 se accha), *Nested PT* on agar available |
 | Network | **NAT**, adapter type = **Paravirt NIC (virtio-net)** ya Intel PRO/1000 MT (82545EM) |
@@ -199,6 +200,96 @@ Pass ka matlab — `dmesg`/console par ye lines (VM me kuch optional skip ho sak
 | pk-get slow/timeout | apps-ISO me apt lists andar hain; agar base ISO hai to pehla `update` 40 MB khinchta hai — 2 GB RAM rakho, ya `pk-get update` ko chhodo aur `--no-install-recommends` use karo |
 | install ke baad disk se boot nahi | VM ke first boot device ko disk banao; GRUB install log dekho: `cat /run/pk-install.log` (live me) |
 | RAM kam (512 MB) | GUI/Wine skip honge; `pk-check` me `warn` aayega (fail nahi) — 1.5-2 GB do |
+
+---
+
+## "GRUB ka menu dikha, phir screen kaali" — timeline, causes, fixes
+
+QEMU `screendump` se maape hue asli numbers (VirtualBox window me bhi wahi hota hai);
+`tools/vm-shot.sh` se khud dobara bana sakte ho:
+
+| time | screen | matlab |
+|---|---|---|
+| 0-15 s | GRUB menu | theek: image, GRUB, ISO padhna sab chal raha hai |
+| ~15-25 s | **poori kaali** (non-black pixels 0.2 %) | kernel + KMS/fbcon handoff - **ye normal hai**, is window me kuch print hi nahi hota |
+| ~25 s ke baad | `### PK: BOOT-OK ... ###`, motd, `login: root  password: pk` | live system chalu ✓ |
+
+Isliye **pehle 60 second ruko** (sasti USB + apps ISO par 90 s tak lag sakte hain). Phir bhi kaali
+rahe to isi order me try karo:
+
+1. **`--type headless` se start kiya? To window kabhi nahi dikhegi** (aapke bheje hue log me
+   headless start tha). GUI ke saath: `VBoxManage startvm <vm> --type gui`.
+   Headless me screen dekhne ka sahi tareeqa (GUI nahi chahiye):
+   `VBoxManage controlvm <vm> screenshotpng /tmp/vm.png`  ← hamare `tools/vm-shot.sh` ka VirtualBox version.
+2. **Safe graphics entry** chuno: boot menu me `v` (nomodeset) ya `b` (nomodeset + serial console).
+   GRUB-ke-baad kaali screen ka #1 reason GPU handoff hota hai (VBox VMSVGA + 3D on, ya aisa
+   physical GPU jise kernel ka `simpledrm` pasand nahi aata).
+3. **VBox: 3D off + controller badlo** (Windows host par Hyper-V/NEM ke saath aksar atakta hai):
+   ```bash
+   VBoxManage controlvm <vm> poweroff
+   VBoxManage modifyvm <vm> --accelerate3d off --graphicscontroller vboxvga --vram 128
+   VBoxManage startvm <vm> --type gui
+   ```
+   (VBoxVGA purana hai par text-mode ke liye robust; VMSVGA 3D ke liye - dono par hamara GUI
+   Xvfb/backend-safe se chalta hai, isliye 3D off karne se GUI test nahi bigdega.)
+4. **RAM**: apps ISO ke liye 2048 MB se kam par /tmp (RAM) pressure se boot atak sakta hai.
+5. **Guaranteed visible path = serial console**: `pkos-1.0-serial.iso` +
+   `VBoxManage modifyvm <vm> --uart1 0x3F8 4 --uartmode1 file /home/you/pkos-serial.log`
+   (ya `--uartmode1 client 127.0.0.1:5555` → `nc -l 5555`). Kernel ki pehli line se login tak
+   sab text aata hai - screen/GPU/GRUB se bilkul independent.
+6. Physical PC: GRUB me `e` dabakar `nomodeset` add karo, ya `video=efifb:off` (UEFI), aur
+   BIOS me CSM/Legacy on karke dekho.
+
+Image me kya add kiya hai (har boot par automatically chalta hai):
+- `etc/pk-boot.d/S08display` hook: har `fb*/blank` ko 0 (unblank), VT par DPMS-off + cursor-on
+  (`ESC[9;0]` + `ESC[?25h` - busybox me `setterm` nahi hota, isliye raw escape), laptop backlight
+  `bl_power=0` + `brightness=max_brightness`, aur `/dev/tty1` par ek "console zinda hai" line —
+  taaki *screen blanking* aur *boot atakna* turant alag dikh jayein. Log marker:
+  `### PK: DISPLAY-OK (text=on fb=N drm=M, bl:...) ###` (text console theek hai - fb na ho tab bhi
+  screen par text aata hai) ya `### PK: DISPLAY-NOCONSOLE ###` (sach me koi console nahi -> tabhi kaali screen).
+  Band karna ho to boot option `pk_display=off`.
+- Default kernel cmdline: `consoleblank=0 vt.global_cursor_default=1`.
+- 2 naye GRUB entries: `v` = safe graphics (nomodeset), `b` = nomodeset + serial.
+- `pk-check` me `backlight` + `fb-blank` rows (report `/run/pk/check.txt`).
+- `tools/vm-shot.sh build/pkos.iso /tmp/shot 40` → VM ki screen PNG + "VISIBLE/BLACK" % (script khud
+  count karta hai; hamare QA me bhi isi se verify hua tha).
+
+---
+
+## Aur agar `Secure Boot: Enabled` bilkul hata hi nahi sakta (Windows 11 PCs par aksar locked)
+
+Hamara GRUB **unsigned** hai, isliye Secure Boot on machine par (VM ya PC) loader load hi nahi hota:
+screen par kuch nahi, ya sirf "Failed to open \EFI\BOOT\BOOTX64.EFI". 3 raaste:
+
+1. **BIOS/Legacy mode me boot karo (sabse aasan, Secure Boot yahan lagu hi nahi hota)**
+   - VirtualBox: `VBoxManage modifyvm <vm> --firmware bios` (default VM naye banane par BIOS use karti hai)
+   - VMware: `.vmx` me `firmware = "bios"` (ya .vmx delete karke VM dobara banao)
+   - QEMU: `-bios /usr/share/OVMF/OVMF_CODE_4M.fd` **ki jagah kuch mat do** = SeaBIOS (default) ✓
+   - Physical PC: boot manager (F12/Esc) me "UEFI: Kingston..." ki jagah bina UEFI- prefix wala entry
+     chuno, aur BIOS setup me **CSM / Legacy / Boot Mode = Legacy or Both** kar do.
+     (Kuch naye laptops me CSM option nahi hota - tab raasta 2 ya 3.)
+2. **Ek baar Secure Boot temporarily off** karke boot ho jaye to: OS install ho jaane ke *baad*
+   phir on kar sakte ho — par tab tak hamara GRUB bhi unsigned rahega, to Secure Boot on par
+   installed OS bhi nahi chalega. Yaani ye sirf test ke liye theek hai.
+3. **Hamare build me aap khud sign kar sakte ho** (roadmap item; abhi auto nahi):
+   Canonical ka pre-signed `shimx64.efi` + `grubx64.efi` leke `/EFI/BOOT/BOOTX64.EFI` ki jagah
+   rakho, aur apna MOK banao:
+   ```bash
+   sudo apt-get install -y shim-signed mokutil sbsigntool
+   sudo sbkeysync --pk --export db.auth >/dev/null 2>&1 || true      # optional
+   sudo mokutil --import /path/apna-mok.der                          # reboot par enroll hoga
+   # phir ISO stage me: cp /usr/lib/shim/shimx64.efi.signed build/work/iso/EFI/BOOT/BOOTX64.EFI
+   ```
+   (SBS-signing ka apna key chain banana physical Secure-Boot PC ke liye hota hai; hamare QEMU
+   OVMF test me `secure-boot=off` rakhna hi reasonable hai, kyonki target machine ka OEM db needed hota hai.)
+4. **Secure Boot ON chhodna ho aur phir bhi boot chahiye**: `pkos-1.0-serial.iso` + BIOS firmware
+   (raasta 1) combination sabse robust hai — hamare QA me 1000+ boots isi se hue hain.
+
+**Note (image ka behaviour):** GRUB menu me 2 entries serial console par bhi print karti hain —
+`c` = `pkos-1.0.iso` wali serial entry, `b` = safe-graphics + serial (nomodeset + serial).
+Aur poori ISO ko serial-first banane ke liye: `make iso PK_SERIAL=1` (release me already
+`pkos-1.0-serial.iso` as a separate asset hai). Screen black rahe to in entries se poora boot log
+mil jaata hai, phir cause (GPU vs blanking vs atka boot) clear ho jaata hai.
 
 ## 5. Mujhe kya bhejo (agar kuch atke)
 ```

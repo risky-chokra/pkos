@@ -48,10 +48,14 @@ MEM=${PK_QEMU_MEM:-640}
 # host ke available RAM se zyada maang rahe ho to kam kar do (warna QEMU
 # "cannot set up guest memory: Cannot allocate memory" de mara jaata hai)
 avail=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
-if [ "${avail:-0}" -gt 0 ]; then
-  cap=$(( avail - 320 )); [ "$cap" -lt 320 ] && cap=320
+# swap bhi backing de sakta hai -> sirf RAM se cap karna over-cautious tha (host par 6 GB
+# swap hone par bhi QA khud 640 MB par simat jaata tha). Ab: RAM + free swap.
+swfree=$(awk '/SwapFree/{print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
+capbase=$(( avail + swfree ))
+if [ "${capbase:-0}" -gt 0 ]; then
+  cap=$(( capbase - 320 )); [ "$cap" -lt 320 ] && cap=320
   if [ "$MEM" -gt "$cap" ]; then
-    printf '  ..  [warn] host available RAM %s MB -> VM RAM %s MB (from %s MB)\n' "$avail" "$cap" "$MEM" >&2
+    printf '  ..  [warn] host backing (RAM %s MB + swap %s MB) -> VM RAM %s MB (from %s MB)\n' "$avail" "$swfree" "$cap" "$MEM" >&2
     MEM=$cap
   fi
 fi
@@ -117,7 +121,7 @@ wipe_disk() {
 # ---------------------------------------------------------------- 0: test ISO
 stage "0/8  test ISO variant (default args: selftest + poweroff + ttyS0)"
 if true; then   # stage 0 sasta hai (~1s) -> hamesha fresh test ISO banega
-  if OUT=$TISO PK_TEST_CMDLINE="pk_selftest pk_poweroff pk_verify=1 pk_tune=report console=ttyS0 loglevel=4" \
+  if OUT=$TISO PK_TEST_CMDLINE="pk_selftest pk_poweroff pk_verify=1 pk_tune=report pk_swap=256 console=ttyS0 loglevel=4" \
        "$PK_ROOT/scripts/mk-iso" > "$LOGDIR/00-mkiso.log" 2>&1; then
     pass "test ISO: $(basename "$TISO") ($(du -h "$TISO" | cut -f1))"
   else
@@ -137,6 +141,19 @@ stage "1/8  live boot from ISO (grub + cdrom)"
   check "$L" 'PK: SELFTEST-OK'        "self test pass (RAM overlay writable)"
   check "$L" 'PK: VERIFY-OK'          "live payload ka sha256 match hua (pk_verify=1)"
   check "$L" 'PK: TUNE-REPORT-OK'     "pk-tune report (sched/io/ipc/security knobs padhe)"
+  check "$L" 'PK: DISPLAY-'            "S08display hook chala (blank off / backlight state)"
+  check "$L" 'PK: TUNE-SWAP-SKIP'      "live (tmpfs/overlay) par swap guard ne rok diya (RAM nahi khayega)"
+  if grep -q "boot/grub/grub.cfg" /dev/null 2>/dev/null; then :; fi
+  if [ -f "$WORK/iso/boot/grub/grub.cfg" ] && grep -q "consoleblank=0" "$WORK/iso/boot/grub/grub.cfg" 2>/dev/null; then
+    total=$((total + 1)); pass "GRUB default args me consoleblank=0 (blanking se kaali screen nahi hogi)"
+  else
+    bad "GRUB default args me consoleblank=0 nahi (live.conf <-> mk-iso drift)"
+  fi
+  if [ -f "$WORK/iso/boot/grub/grub.cfg" ] && grep -q "nomodeset" "$WORK/iso/boot/grub/grub.cfg" 2>/dev/null; then
+    total=$((total + 1)); pass "GRUB menu me 'safe graphics (nomodeset)' entry maujood (black-screen fallback)"
+  else
+    bad "GRUB menu me nomodeset entry nahi (black-screen fallback missing)"
+  fi
   check "$L" 'base is read-only'         "squashfs base read-only hai"
   check "$L" 'live medium visible'       "installer ke liye medium mount hai"
   check "$L" 'PK: DEPS-OK'            "installer ke tools (parted/mke2fs/grub-install...) chal sakte hain"
@@ -268,7 +285,7 @@ elif want 2 || want 3; then
       as_root umount "$mp" 2>/dev/null || true
       as_root mount -o loop,offset="$off" "$DISK" "$mp" 2>/dev/null || return 1
       [ -f "$mp/boot/grub/grub.cfg" ] || { as_root umount "$mp" 2>/dev/null; return 1; }
-      as_root sed -i -e 's|loglevel=3|loglevel=4 console=ttyS0 pk_selftest pk_poweroff|' \
+      as_root sed -i -e 's|loglevel=3|loglevel=4 console=ttyS0 pk_selftest pk_poweroff pk_swap=256|' \
                      -e 's|root=UUID=.*|& console=ttyS0 pk_selftest pk_poweroff|' \
                      "$mp/boot/grub/grub.cfg" 2>/dev/null
       as_root sync; as_root umount "$mp" 2>/dev/null || true
@@ -282,6 +299,7 @@ elif want 2 || want 3; then
       check "$L" 'PK: SELFTEST-OK'           "installed root writable + tools ok"
       check "$L" 'PK: PASSWD-OK'             "installed /etc/shadow me real sha-crypt hash hai"
       check "$L" 'PK: LOGIN-REQUIRED'        "installed system password maangta hai (autologin nahi)"
+      check "$L" 'PK: TUNE-SWAP-OK'          "installed ext4 par pk_swap=256 se swapfile bana + chalu"
       grep -q 'BOOT FAIL\|Kernel panic\|Unable to mount\|No bootable device' "$L" && {
         note "--- installed log tail ---"; tail -25 "$L" | sed 's/^/    /'; }
     else

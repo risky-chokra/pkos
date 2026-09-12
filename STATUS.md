@@ -174,6 +174,58 @@ Poora table: **docs/COMPARE.md**. Jo kami is comparison se nikli — sab *add* k
   me macOS guest / Darling / binderfs kernel **test nahi** kiye (KVM nahi, 8 GB RAM nahi,
   kernel build 30-90 min). `docs/IOS-ANDROID.md` me poora hisaab.
 
+### 4f. "GRUB ke baad display kaali" (user ka VBox report) — reproduce + fix
+
+User ne kaha: menu theek, uske baad black screen. Pehli baar **screen ko khud capture** kiya
+(QEMU `-vga std/-device vmware-svga` + monitor socket par `screendump`), naya tool
+`tools/vm-shot.sh` — jo PNG + "kitne % pixels non-black hain" report karta hai:
+
+| snapshot | non-black | screen |
+|---|---|---|
+| t=3 s | 7.3 % | GRUB menu ✓ |
+| t=18 s | **0.2 %** | poori kaali — kernel/KMS handoff window (normal) |
+| t=24/30/36 s | 6.2 % | `### PK: BOOT-OK ###` + motd + `login: root password: pk` ✓ |
+
+Yaani QEMU/std-VGA aur QEMU/vmware-svga (VBox VMSVGA ka equivalent) dono par boot **dikh jaata hai**;
+15-25 s ka kaala window expected hai. User ke case me sabse likely: (a) `--type headless` start
+(their log me wahi tha) → window hi nahi, (b) 3D+VMSVGA handoff, (c) 900 MB RAM (< required 2 GB).
+
+Additive fixes (kuch hataaya nahi):
+- `etc/pk-boot.d/S08display` hook: har boot par `fb*/blank=0`, VT DPMS-off + cursor-on (raw ANSI,
+  busybox me `setterm` nahi hai), laptop backlight `bl_power=0` + brightness=max, aur `/dev/tty1`
+  par ek line → "blanking" vs "ataka boot" 1 second me alag. Marker `DISPLAY-OK`/`DISPLAY-NOCONSOLE`,
+  option `pk_display=off`.
+- Default cmdline me `consoleblank=0 vt.global_cursor_default=1`.
+- GRUB me 2 nayi entries: `v` = safe graphics (`nomodeset`), `b` = nomodeset + serial.
+- `pk-check` me `backlight` + `fb-blank` rows; `tools/vm-shot.sh` (screenshot harness);
+  docs: `VM-TEST.md` ka naya section (VBox `controlvm screenshotpng`, 3D-off/vboxvga recipe,
+  serial path) + `PENDRIVE.md` me "kya dikhega" timeline.
+- QA stage 1 me 2 naye checks (`PK: DISPLAY-` marker, grub.cfg me nomodeset entry) →
+  `make test` = **QA PASS 70 checks ok**.
+
+Sandbox ne beech me `.git` ko `c2c545c` par roll-back kar diya tha (media-audit commit sirf GitHub
+par tha) → `git fetch origin` + rebase se dono rounds ek saath; QA uske baad 70/70.
+
+**Abhi unchecked:** user ki asli VirtualBox window (mere paas sirf unka headless log tha) aur real
+physical GPU/UEFI machine — dono par `v`/`b` entries aur serial path hi final answer denge.
+
+### 4g. 6 GB RAM/swap (user ki request) + swap ka footgun fix
+
+User bola "use 6gb swap" → do kaam:
+1. **Naya boot option `pk_swap=<MB>|auto|off`** (`S60tune`): installed system ya PK-PERSIST (ext4) par
+   `/var/tmp/pk-swapfile` (pehle /persistence try) bana ke `swapon`; `auto` = RAM/2 (1–8 GB clamp); marker `TUNE-SWAP-OK (NM)` / `TUNE-SWAP-SKIP`.
+   `/etc/default/pk` me `PK_SWAP=` default. Manual: `pk-tune swap 6144`, `pk-tune swap 0`.
+2. **Bug jo isme dikha (pehle se tha):** purana `pk-tune swap` bina filesystem-check ke
+   `/var/tmp` me `dd` karta tha — **live session me /var/tmp = tmpfs = RAM**, yaani "6 GB swap"
+   maangne par 6 GB RAM khao jaata (aur swapon tmpfs par fail hi hota). Ab:
+   `fstype_of()` (findmnt, fallback /proc/self/mounts) se sirf ext2/3/4, xfs, btrfs, f2fs accept
+   hote hain; `df -Pk` se free-space check (kam ho to size khud chhoti kar deta hai, bahut kam ho
+   to skip); `mb` non-numeric/64 GB+ par clamp. Live me result ab **saaf SKIP** hai, silent fail nahi.
+3. QA: stage 0 ke test ISO me `pk_swap=256`; stage 1 me naya check
+   `PK: TUNE-SWAP-SKIP` (live guard kaam karta hai) aur stage 3 (installed ext4) me
+   `PK: TUNE-SWAP-OK` (asli swapfile + swapon) — yaani dono side prove hote hain.
+4. VM settings: apps ISO ke liye **6144 MB RAM** recommended (docs/VM-TEST.md ki table update).
+
 ## 5. Aapke PC pe ab kya karna hai (emulator → pendrive → install)
 
 ```sh

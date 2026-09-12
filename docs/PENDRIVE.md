@@ -52,6 +52,7 @@ VM me pehle try karna ho to: **[VM-TEST.md](VM-TEST.md)** (QEMU/VirtualBox/VMwar
 
 ## 2. PC se boot
 
+0. **Kya dikhega (normal)**: 0-15 s GRUB menu -> ~15-25 s **poori kaali screen** (kernel/GPU handoff - ye expected hai, boot atka hua nahi) -> ~25 s me `### PK: BOOT-OK ###`, motd aur `login: root / password: pk`. **60 s tak ruko**; uske baad bhi kaali rahe to menu me `v` (safe graphics / nomodeset) chuno, ya `docs/VM-TEST.md` ka "GRUB ke baad screen kaali" section (usme VirtualBox headless + `controlvm screenshotpng` ka tareeqa bhi hai).
 1. BIOS/UEFI setup me: **Secure Boot OFF** (hamara GRUB unsigned hai), boot menu se USB select.
 2. GRUB menu (hotkeys):
 
@@ -74,6 +75,7 @@ Kisi bhi entry par `e` dabakar options add kar sakte ho, jaise:
 pk_keymap=in  pk_rootpw=MyPw  pk_install_user=ramesh pk_install_userpw=SomePw
 pk_runtime=/dev/sdb3  pk_apps_get=htop  pk_check=gui  pk_desktop=1  persistent
 pk_wifi=<ssid>:<password>      # laptop jisme ethernet nahi (experimental: wpa_supplicant
+pk_swap=<MB>|auto                      # swapfile (installed: /var/tmp, live+persist: /persistence); live me guard se skip
                                #  runtime me chahiye -> pk-get install -y wpasupplicant iw)
 ```
 
